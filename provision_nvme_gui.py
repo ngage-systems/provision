@@ -54,6 +54,12 @@ ACCESSORY_CHECK_ITEMS = [
     ("power_monitor", "Power monitor"),
     ("camera", "Camera"),
 ]
+TOUCH_KEYBOARD_ROWS = [
+    list("1234567890"),
+    list("qwertyuiop"),
+    list("asdfghjkl"),
+    list("zxcvbnm.-_/@"),
+]
 
 
 def script_defaults_file():
@@ -93,31 +99,111 @@ def read_hostname_default():
         return socket.gethostname()
 
 
-def scan_wifi_ssids():
+def quick_command(cmd, timeout=10):
+    try:
+        return subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", f"Missing command: {cmd[0]}")
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            exc.stdout or "",
+            exc.stderr or f"Timed out running: {' '.join(cmd)}",
+        )
+
+
+def parse_ssids(lines):
+    return sorted({line.strip() for line in lines if line and line.strip()})
+
+
+def wifi_interfaces_from_nmcli():
+    result = quick_command(["nmcli", "-t", "-f", "DEVICE,TYPE", "dev", "status"], timeout=8)
+    if result.returncode != 0:
+        return []
+    interfaces = []
+    for line in result.stdout.splitlines():
+        device, sep, dev_type = line.partition(":")
+        if sep and dev_type == "wifi" and device:
+            interfaces.append(device)
+    return interfaces
+
+
+def wifi_interfaces_from_iw():
+    result = quick_command(["iw", "dev"], timeout=8)
+    if result.returncode != 0:
+        return []
+    interfaces = []
+    for line in result.stdout.splitlines():
+        match = re.match(r"\s*Interface\s+(.+)$", line)
+        if match:
+            interfaces.append(match.group(1).strip())
+    return interfaces
+
+
+def scan_wifi_ssids(wifi_country=""):
     scan_file = Path(WIFI_SCAN_FILE)
     if scan_file.is_file():
-        ssids = [line.strip() for line in scan_file.read_text(encoding="utf-8").splitlines()]
-        return sorted({ssid for ssid in ssids if ssid})
+        ssids = parse_ssids(scan_file.read_text(encoding="utf-8").splitlines())
+        if ssids:
+            return ssids, f"Loaded {len(ssids)} SSID(s) from {scan_file}."
+
+    if shutil.which("rfkill"):
+        quick_command(["rfkill", "unblock", "wifi"], timeout=5)
+
+    if shutil.which("nmcli"):
+        quick_command(["nmcli", "radio", "wifi", "on"], timeout=8)
+
+    wifi_country = (wifi_country or "").strip().upper()
+    if re.fullmatch(r"[A-Z]{2}", wifi_country) and shutil.which("iw"):
+        quick_command(["sudo", "-n", "iw", "reg", "set", wifi_country], timeout=5)
+
+    time.sleep(1)
 
     commands = [
-        ["nmcli", "-t", "-f", "SSID", "dev", "wifi", "list", "--rescan", "yes"],
-        ["nmcli", "-t", "-f", "SSID", "dev", "wifi", "list"],
+        ["nmcli", "--escape", "no", "-t", "-f", "SSID", "dev", "wifi", "list", "--rescan", "yes"],
+        ["nmcli", "--escape", "no", "-t", "-f", "SSID", "dev", "wifi", "list"],
     ]
+    diagnostics = []
     for cmd in commands:
-        try:
-            result = subprocess.run(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if result.returncode == 0 and result.stdout.strip():
-            ssids = [line.strip() for line in result.stdout.splitlines()]
-            return sorted({ssid for ssid in ssids if ssid})
-    return []
+        result = quick_command(cmd, timeout=15)
+        if result.returncode == 0:
+            ssids = parse_ssids(result.stdout.splitlines())
+            if ssids:
+                return ssids, f"Found {len(ssids)} SSID(s) with nmcli."
+        elif result.stderr.strip():
+            diagnostics.append(result.stderr.strip())
+
+    interfaces = wifi_interfaces_from_nmcli() or wifi_interfaces_from_iw()
+    for iface in interfaces:
+        for cmd in (["sudo", "-n", "iw", "dev", iface, "scan"], ["iw", "dev", iface, "scan"]):
+            result = quick_command(cmd, timeout=20)
+            if result.returncode != 0:
+                if result.stderr.strip():
+                    diagnostics.append(result.stderr.strip())
+                continue
+            ssids = []
+            for line in result.stdout.splitlines():
+                match = re.match(r"\s*SSID:\s*(.*)$", line)
+                if match:
+                    ssids.append(match.group(1))
+            ssids = parse_ssids(ssids)
+            if ssids:
+                return ssids, f"Found {len(ssids)} SSID(s) with iw on {iface}."
+
+    if not shutil.which("nmcli") and not shutil.which("iw"):
+        return [], "Neither nmcli nor iw is available for Wi-Fi scanning."
+    if not interfaces:
+        return [], "No Wi-Fi interface was reported by nmcli or iw."
+    if diagnostics:
+        return [], diagnostics[-1]
+    return [], "No Wi-Fi SSIDs were found after enabling radio and rescanning."
 
 
 def run_command(cmd, timeout=30, env=None):
@@ -502,9 +588,7 @@ class ProvisioningWizard(tk.Tk):
         self.title("Device Provisioning")
         self.configure(bg=BG)
 
-        # Fullscreen on the device; comment out for desktop testing.
-        # self.attributes("-fullscreen", True)
-        self.geometry("1280x800")
+        self._configure_window_size()
 
         self.output_path = output_path
         self._self_update_retry_needed = False
@@ -513,7 +597,11 @@ class ProvisioningWizard(tk.Tk):
         self.defaults_path = Path(os.environ.get("DEVICE_DEFAULTS_FILE", script_defaults_file()))
         self.config = load_defaults_config(self.defaults_path)
         self.groups = device_groups(self.config)
-        self.wifi_ssids = scan_wifi_ssids()
+        self.wifi_ssids = []
+        self.wifi_scan_message = ""
+        self._focused_entry = None
+        self._keyboard_shift = False
+        self._keyboard_key_buttons = []
         self._last_wifi_test_signature = None
 
         self.answers = {
@@ -554,16 +642,33 @@ class ProvisioningWizard(tk.Tk):
         self._build_layout()
         self._render_current_step()
 
+    def _configure_window_size(self):
+        screen_w = max(1, self.winfo_screenwidth())
+        screen_h = max(1, self.winfo_screenheight())
+        width = min(1280, screen_w)
+        height = min(800, screen_h)
+        self.geometry(f"{width}x{height}+0+0")
+        self.minsize(min(760, width), min(420, height))
+
     # ------------------------------------------------------------------
-    # Layout: a top content frame and a nav frame kept above the area an
-    # on-screen keyboard is likely to cover.
+    # Layout: content expands, the touch keyboard appears above nav, and
+    # navigation stays pinned to the bottom of the window.
     # ------------------------------------------------------------------
     def _build_layout(self):
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)
+        self.grid_rowconfigure(2, weight=0)
+
         self.content = tk.Frame(self, bg=BG, padx=40, pady=30)
-        self.content.place(x=0, y=0, relwidth=1.0, height=380)
+        self.content.grid(row=0, column=0, sticky="nsew")
+
+        self.keyboard = tk.Frame(self, bg=ENTRY_BG, padx=18, pady=10)
+        self._build_touch_keyboard()
+        self.bind_all("<Button-1>", self._hide_keyboard_on_non_entry_tap, add="+")
 
         self.nav = tk.Frame(self, bg=BG, padx=40, pady=10)
-        self.nav.place(x=0, y=380, relwidth=1.0, height=80)
+        self.nav.grid(row=2, column=0, sticky="ew")
 
         self.btn_back = self._make_button(self.nav, "< Back", self._on_back)
         self.btn_back.pack(side="left")
@@ -602,6 +707,110 @@ class ProvisioningWizard(tk.Tk):
             highlightthickness=0,
             cursor="hand2",
         )
+
+    def _make_keyboard_button(self, parent, text, command, width=4):
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=BG,
+            fg=FG,
+            activebackground="#45475a",
+            activeforeground=FG,
+            font=FONT_LABEL,
+            relief="flat",
+            width=width,
+            pady=6,
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=0,
+        )
+
+    def _build_touch_keyboard(self):
+        for row_index, keys in enumerate(TOUCH_KEYBOARD_ROWS):
+            row = tk.Frame(self.keyboard, bg=ENTRY_BG)
+            row.pack(anchor="center", pady=2)
+            for key in keys:
+                button = self._make_keyboard_button(
+                    row, key, lambda value=key: self._keyboard_insert(value)
+                )
+                button.pack(side="left", padx=2)
+                self._keyboard_key_buttons.append((button, key))
+
+        controls = tk.Frame(self.keyboard, bg=ENTRY_BG)
+        controls.pack(anchor="center", pady=(4, 0))
+        self._make_keyboard_button(
+            controls, "Shift", self._keyboard_toggle_shift, width=7
+        ).pack(side="left", padx=3)
+        self._make_keyboard_button(
+            controls, "Space", lambda: self._keyboard_insert(" "), width=10
+        ).pack(side="left", padx=3)
+        self._make_keyboard_button(
+            controls, "Backspace", self._keyboard_backspace, width=10
+        ).pack(side="left", padx=3)
+        self._make_keyboard_button(
+            controls, "Clear", self._keyboard_clear, width=7
+        ).pack(side="left", padx=3)
+        self._make_keyboard_button(
+            controls, "Hide", self._hide_touch_keyboard, width=7
+        ).pack(side="left", padx=3)
+
+    def _show_touch_keyboard(self, entry):
+        self._focused_entry = entry
+        if not self.keyboard.winfo_ismapped():
+            self.keyboard.grid(row=1, column=0, sticky="ew")
+
+    def _hide_touch_keyboard(self):
+        if self.keyboard.winfo_manager():
+            self.keyboard.grid_remove()
+
+    def _is_descendant(self, widget, ancestor):
+        while widget is not None:
+            if widget == ancestor:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _hide_keyboard_on_non_entry_tap(self, event):
+        widget = event.widget
+        if isinstance(widget, tk.Entry) or self._is_descendant(widget, self.keyboard):
+            return
+        self._hide_touch_keyboard()
+
+    def _keyboard_toggle_shift(self):
+        self._keyboard_shift = not self._keyboard_shift
+        for button, key in self._keyboard_key_buttons:
+            button.config(text=key.upper() if self._keyboard_shift and key.isalpha() else key)
+
+    def _keyboard_insert(self, value):
+        entry = self._focused_entry
+        if not entry or not entry.winfo_exists():
+            return
+        if self._keyboard_shift and value.isalpha():
+            value = value.upper()
+        entry.insert(tk.INSERT, value)
+        entry.focus_set()
+
+    def _keyboard_backspace(self):
+        entry = self._focused_entry
+        if not entry or not entry.winfo_exists():
+            return
+        try:
+            start = entry.index("sel.first")
+            end = entry.index("sel.last")
+            entry.delete(start, end)
+        except tk.TclError:
+            cursor = entry.index(tk.INSERT)
+            if cursor > 0:
+                entry.delete(cursor - 1)
+        entry.focus_set()
+
+    def _keyboard_clear(self):
+        entry = self._focused_entry
+        if not entry or not entry.winfo_exists():
+            return
+        entry.delete(0, tk.END)
+        entry.focus_set()
 
     def _clear_content(self):
         for child in self.content.winfo_children():
@@ -662,6 +871,20 @@ class ProvisioningWizard(tk.Tk):
     def _recheck_accessories(self):
         if self.steps[self.step_index].__name__ == "_step_accessory_checks":
             self._render_current_step()
+
+    def _refresh_wifi_scan(self):
+        dialog = self._show_busy_dialog(
+            "Scanning Wi-Fi",
+            "Enabling Wi-Fi radio, applying country settings, and scanning for nearby networks.",
+        )
+        try:
+            self.update_idletasks()
+            country = self.answers.get("wifi_country", DEFAULT_WIFI_COUNTRY)
+            self.wifi_ssids, self.wifi_scan_message = scan_wifi_ssids(country)
+        finally:
+            dialog.grab_release()
+            dialog.destroy()
+            self.update_idletasks()
 
     def _on_finish(self):
         if not self._confirm_destructive_provision():
@@ -763,6 +986,8 @@ class ProvisioningWizard(tk.Tk):
             highlightcolor=ACCENT,
         )
         entry.pack(fill="x", ipady=8, pady=5)
+        entry.bind("<FocusIn>", lambda _event, widget=entry: self._show_touch_keyboard(widget), add="+")
+        entry.bind("<Button-1>", lambda _event, widget=entry: self._show_touch_keyboard(widget), add="+")
         return var, entry
 
     def _add_listbox(self, entries, selected_value=""):
@@ -1069,6 +1294,21 @@ class ProvisioningWizard(tk.Tk):
     def _step_wifi_ssid(self):
         self._add_title("Choose Wi-Fi network")
         self._add_label("Select a network, type a network name, or leave this blank if using Ethernet.")
+        self._refresh_wifi_scan()
+
+        scan_row = tk.Frame(self.content, bg=BG)
+        scan_row.pack(fill="x", pady=(0, 10))
+        self._make_button(scan_row, "Rescan Wi-Fi", self._render_current_step).pack(side="left")
+        if self.wifi_scan_message:
+            tk.Label(
+                scan_row,
+                text=self.wifi_scan_message,
+                bg=BG,
+                fg=MUTED,
+                font=FONT_LABEL,
+                justify="left",
+                wraplength=760,
+            ).pack(side="left", padx=15)
 
         if self.wifi_ssids:
             selected = self.answers.get("wifi_ssid", "")

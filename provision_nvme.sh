@@ -774,13 +774,13 @@ update_self_if_possible() {
   after="$(git_cmd rev-parse HEAD 2>/dev/null || true)"
 
   if [[ -n "$before" && "$before" != "$after" ]]; then
-    local updated_script="${repo_root}/hb-clients/provision/provision_nvme.sh"
-    if [[ -x "$updated_script" ]]; then
+    local updated_script="${repo_root}/provision_nvme.sh"
+    if [[ -r "$updated_script" ]]; then
       log "Self-update: updated script detected; restarting..."
       log "Provisioning script updated. Restarting setup now so the newest provisioning steps are used."
       log "Restarting with the same answers file: $ANSWERS_FILE"
       sleep 3
-      exec sudo HB_SELFUPDATED=1 HB_POST_UPDATE_ATTEMPTED=1 "$updated_script" --answers "$ANSWERS_FILE"
+      exec sudo HB_SELFUPDATED=1 HB_POST_UPDATE_ATTEMPTED=1 bash "$updated_script" --answers "$ANSWERS_FILE"
     else
       log "WARNING: Updated script not found at ${updated_script}; continuing."
     fi
