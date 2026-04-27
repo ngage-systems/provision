@@ -47,6 +47,7 @@ ANSWER_MONITOR_DISTANCE_CM=""
 ANSWER_CONFIRM_ERASE=""
 ANSWER_NVME_DEVICE=""
 ANSWER_ALLOW_POSSIBLE_SD=""
+ANSWER_ACCESSORY_CHECKS_JSON=""
 
 DEFAULTS_FILE=""
 DEFAULTS_SECTION=""
@@ -439,6 +440,11 @@ for shell_name, json_name in keys.items():
     else:
         value = str(value)
     print(f"{shell_name}={shlex.quote(value)}")
+
+accessory_checks = data.get("accessory_checks", {})
+if not isinstance(accessory_checks, dict):
+    accessory_checks = {}
+print(f"ANSWER_ACCESSORY_CHECKS_JSON={shlex.quote(json.dumps(accessory_checks, sort_keys=True))}")
 PY
 )"
   eval "$assignments"
@@ -547,6 +553,112 @@ validate_answers() {
   if [[ -n "$ANSWER_ALLOW_POSSIBLE_SD" ]]; then
     [[ "$ANSWER_ALLOW_POSSIBLE_SD" == "YES" || "$ANSWER_ALLOW_POSSIBLE_SD" == "true" ]] || die "allow_possible_sd must be YES or true when provided."
   fi
+}
+
+log_gui_accessory_checks() {
+  if [[ -z "$ANSWER_ACCESSORY_CHECKS_JSON" || "$ANSWER_ACCESSORY_CHECKS_JSON" == "{}" ]]; then
+    log "Accessory checks (GUI): not reported."
+    return 0
+  fi
+
+  local output
+  output="$(ACCESSORY_CHECKS_JSON="$ANSWER_ACCESSORY_CHECKS_JSON" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+
+labels = [
+    ("touchscreen", "Touchscreen"),
+    ("juicer", "Juicer"),
+    ("power_monitor", "Power monitor"),
+    ("camera", "Camera"),
+]
+
+try:
+    data = json.loads(os.environ.get("ACCESSORY_CHECKS_JSON", "{}"))
+except json.JSONDecodeError:
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+
+detected = 0
+missing = []
+for key, label in labels:
+    result = data.get(key, {})
+    if not isinstance(result, dict):
+        result = {}
+    is_detected = result.get("detected") is True
+    detail = str(result.get("detail", "")).strip()
+    status = "detected" if is_detected else "not detected"
+    if is_detected:
+        detected += 1
+    else:
+        missing.append(label)
+    suffix = f" ({detail})" if detail else ""
+    print(f"Accessory checks (GUI): {label}: {status}{suffix}")
+
+summary = f"Accessory checks (GUI): {detected}/{len(labels)} detected"
+if missing:
+    summary += "; missing: " + ", ".join(missing)
+print(summary)
+PY
+)"
+  if [[ -z "$output" ]]; then
+    log "Accessory checks (GUI): could not parse reported results."
+    return 0
+  fi
+  while IFS= read -r line; do
+    log "$line"
+  done <<< "$output"
+}
+
+log_live_accessory_checks() {
+  local usb_output=""
+  local touchscreen_status="not detected"
+  local touchscreen_detail="USB touchscreen controller 0eef:c002 or 222a:0001 not found"
+  local juicer_status="not detected"
+  local juicer_detail="USB device containing 'juicer' not found"
+  local power_status="not detected"
+  local power_detail="/dev/serial/by-id/usb-Homebase_power_monitor_*-if00 not found"
+  local camera_status="not detected"
+  local camera_detail="No cameras reported by rpicam-hello --list-cameras"
+
+  if have_cmd lsusb; then
+    usb_output="$(lsusb 2>/dev/null || true)"
+    if echo "$usb_output" | grep -Eiq 'ID (0eef:c002|222a:0001)'; then
+      touchscreen_status="detected"
+      touchscreen_detail="$(echo "$usb_output" | grep -Ei 'ID (0eef:c002|222a:0001)' | sed -n '1p')"
+    fi
+    if echo "$usb_output" | grep -iq 'juicer'; then
+      juicer_status="detected"
+      juicer_detail="$(echo "$usb_output" | grep -i 'juicer' | sed -n '1p')"
+    fi
+  else
+    touchscreen_detail="Missing command: lsusb"
+    juicer_detail="Missing command: lsusb"
+  fi
+
+  if compgen -G "/dev/serial/by-id/usb-Homebase_power_monitor_*-if00" >/dev/null; then
+    power_status="detected"
+    power_detail="$(compgen -G "/dev/serial/by-id/usb-Homebase_power_monitor_*-if00" | sed -n '1p')"
+  fi
+
+  if have_cmd rpicam-hello; then
+    local camera_output
+    camera_output="$(rpicam-hello --list-cameras 2>&1 || true)"
+    if echo "$camera_output" | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]*:'; then
+      camera_status="detected"
+      camera_detail="$(echo "$camera_output" | grep -E '^[[:space:]]*[0-9]+[[:space:]]*:' | sed -n '1p')"
+    elif [[ -n "$camera_output" ]]; then
+      camera_detail="$(echo "$camera_output" | sed -n '1p')"
+    fi
+  else
+    camera_detail="Missing command: rpicam-hello"
+  fi
+
+  log "Accessory checks (live): Touchscreen: ${touchscreen_status} (${touchscreen_detail})"
+  log "Accessory checks (live): Juicer: ${juicer_status} (${juicer_detail})"
+  log "Accessory checks (live): Power monitor: ${power_status} (${power_detail})"
+  log "Accessory checks (live): Camera: ${camera_status} (${camera_detail})"
 }
 
 require_root() {
@@ -1770,7 +1882,7 @@ write_dserv_agent_override_root() {
   cat > "$override_file" <<EOF
 [Service]
 ExecStart=
-ExecStart=/usr/local/bin/dserv-agent --registry ${DEFAULT_MESH_HOST} --workgroup ${DEFAULT_MESH_WORKGROUP} --no-tls -allow-reboot -components /usr/local/dserv/config/components.json
+ExecStart=/usr/local/bin/dserv-agent --no-tls -allow-reboot -components /usr/local/dserv/config/components.json
 EOF
 }
 
@@ -1900,6 +2012,14 @@ install_dserv_latest_root() {
     cp -n "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" "$mesh_target" || true
     if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$mesh_target" ]]; then
       sed -i -E "s|^mesh_configure[[:space:]]+\"[^\"]*\"[[:space:]]+\"[^\"]*\"|mesh_configure \"${DEFAULT_MESH_HOST}\" \"${DEFAULT_MESH_WORKGROUP}\"|" "$mesh_target"
+    fi
+  fi
+  if [[ -f "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" ]]; then
+    local pre_registry_target="${root_mnt}/usr/local/dserv/local/pre-registry.tcl"
+    cp -n "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" "$pre_registry_target" || true
+    if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$pre_registry_target" ]]; then
+      sed -i -E "s|^set env\\(ESS_REGISTRY_URL\\)[[:space:]]+.*|set env(ESS_REGISTRY_URL) ${DEFAULT_MESH_HOST}|" "$pre_registry_target"
+      sed -i -E "s|^set env\\(ESS_WORKGROUP\\)[[:space:]]+.*|set env(ESS_WORKGROUP)    ${DEFAULT_MESH_WORKGROUP}|" "$pre_registry_target"
     fi
   fi
 }
@@ -2058,6 +2178,9 @@ main() {
     log "If an update is found, setup will restart so the newest provisioning script is used."
   fi
   update_self_if_possible "post" || true
+
+  log_gui_accessory_checks
+  log_live_accessory_checks
 
   timezone="$ANSWER_TIMEZONE"
   locale="$ANSWER_LOCALE"
