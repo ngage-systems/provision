@@ -54,24 +54,75 @@ ACCESSORY_CHECK_ITEMS = [
     ("power_monitor", "Power monitor"),
     ("camera", "Camera"),
 ]
-TOUCH_KEYBOARD_LAYOUTS = {
-    "letters": [
-        {"keys": list("qwertyuiop"), "pad": 0},
-        {"keys": list("asdfghjkl"), "pad": 2},
-        {"keys": list("zxcvbnm"), "pad": 4},
-    ],
-    "shift": [
-        {"keys": list("QWERTYUIOP"), "pad": 0},
-        {"keys": list("ASDFGHJKL"), "pad": 2},
-        {"keys": list("ZXCVBNM"), "pad": 4},
-    ],
-    "symbols": [
-        {"keys": list("1234567890"), "pad": 0},
-        {"keys": list("!@#$%^&*()"), "pad": 0},
-        {"keys": ["-", "_", "=", "+", "[", "]", "{", "}", "\\", "|"], "pad": 0},
-        {"keys": [";", ":", "'", "\"", ",", ".", "/", "?", "`", "~"], "pad": 0},
-    ],
-}
+US_ANSI_KEY_ROWS = [
+    {
+        "pad": 0,
+        "keys": [
+            ("`", "~"),
+            ("1", "!"),
+            ("2", "@"),
+            ("3", "#"),
+            ("4", "$"),
+            ("5", "%"),
+            ("6", "^"),
+            ("7", "&"),
+            ("8", "*"),
+            ("9", "("),
+            ("0", ")"),
+            ("-", "_"),
+            ("=", "+"),
+        ],
+    },
+    {
+        "pad": 2,
+        "keys": [
+            ("q", "Q"),
+            ("w", "W"),
+            ("e", "E"),
+            ("r", "R"),
+            ("t", "T"),
+            ("y", "Y"),
+            ("u", "U"),
+            ("i", "I"),
+            ("o", "O"),
+            ("p", "P"),
+            ("[", "{"),
+            ("]", "}"),
+            ("\\", "|"),
+        ],
+    },
+    {
+        "pad": 4,
+        "keys": [
+            ("a", "A"),
+            ("s", "S"),
+            ("d", "D"),
+            ("f", "F"),
+            ("g", "G"),
+            ("h", "H"),
+            ("j", "J"),
+            ("k", "K"),
+            ("l", "L"),
+            (";", ":"),
+            ("'", "\""),
+        ],
+    },
+    {
+        "pad": 6,
+        "keys": [
+            ("z", "Z"),
+            ("x", "X"),
+            ("c", "C"),
+            ("v", "V"),
+            ("b", "B"),
+            ("n", "N"),
+            ("m", "M"),
+            (",", "<"),
+            (".", ">"),
+            ("/", "?"),
+        ],
+    },
+]
 
 
 def script_defaults_file():
@@ -612,7 +663,7 @@ class ProvisioningWizard(tk.Tk):
         self.wifi_ssids = []
         self.wifi_scan_message = ""
         self._focused_entry = None
-        self._keyboard_mode = "letters"
+        self._keyboard_shift = False
         self._keyboard_rows_frame = None
         self._last_wifi_test_signature = None
 
@@ -744,32 +795,24 @@ class ProvisioningWizard(tk.Tk):
         for child in self._keyboard_rows_frame.winfo_children():
             child.destroy()
 
-        for spec in TOUCH_KEYBOARD_LAYOUTS[self._keyboard_mode]:
+        for spec in US_ANSI_KEY_ROWS:
             row = tk.Frame(self._keyboard_rows_frame, bg=ENTRY_BG)
             row.pack(anchor="center", pady=2)
             if spec.get("pad", 0):
                 tk.Frame(row, width=spec["pad"] * 18, bg=ENTRY_BG).pack(side="left")
-            for key in spec["keys"]:
+            for key, shifted in spec["keys"]:
+                value = shifted if self._keyboard_shift else key
                 self._make_keyboard_button(
-                    row, key, lambda value=key: self._keyboard_insert(value)
+                    row, value, lambda insert_value=value: self._keyboard_insert(insert_value)
                 ).pack(side="left", padx=2)
 
         controls = tk.Frame(self._keyboard_rows_frame, bg=ENTRY_BG)
         controls.pack(anchor="center", pady=(4, 0))
 
-        if self._keyboard_mode == "symbols":
-            self._make_keyboard_button(
-                controls, "ABC", self._keyboard_show_letters, width=7
-            ).pack(side="left", padx=3)
-        else:
-            shift_text = "Shift" if self._keyboard_mode == "letters" else "SHIFT"
-            self._make_keyboard_button(
-                controls, shift_text, self._keyboard_toggle_shift, width=7
-            ).pack(side="left", padx=3)
-            self._make_keyboard_button(
-                controls, "?123", self._keyboard_show_symbols, width=7
-            ).pack(side="left", padx=3)
-
+        shift_text = "Shift" if not self._keyboard_shift else "SHIFT"
+        self._make_keyboard_button(
+            controls, shift_text, self._keyboard_toggle_shift, width=7
+        ).pack(side="left", padx=3)
         self._make_keyboard_button(
             controls, "Space", lambda: self._keyboard_insert(" "), width=18
         ).pack(side="left", padx=3)
@@ -793,15 +836,7 @@ class ProvisioningWizard(tk.Tk):
             self.keyboard.pack_forget()
 
     def _keyboard_toggle_shift(self):
-        self._keyboard_mode = "shift" if self._keyboard_mode == "letters" else "letters"
-        self._render_touch_keyboard()
-
-    def _keyboard_show_symbols(self):
-        self._keyboard_mode = "symbols"
-        self._render_touch_keyboard()
-
-    def _keyboard_show_letters(self):
-        self._keyboard_mode = "letters"
+        self._keyboard_shift = not self._keyboard_shift
         self._render_touch_keyboard()
 
     def _keyboard_insert(self, value):
