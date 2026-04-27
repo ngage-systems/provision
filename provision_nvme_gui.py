@@ -54,12 +54,24 @@ ACCESSORY_CHECK_ITEMS = [
     ("power_monitor", "Power monitor"),
     ("camera", "Camera"),
 ]
-TOUCH_KEYBOARD_ROWS = [
-    list("1234567890"),
-    list("qwertyuiop"),
-    list("asdfghjkl"),
-    list("zxcvbnm.-_/@"),
-]
+TOUCH_KEYBOARD_LAYOUTS = {
+    "letters": [
+        {"keys": list("qwertyuiop"), "pad": 0},
+        {"keys": list("asdfghjkl"), "pad": 2},
+        {"keys": list("zxcvbnm"), "pad": 4},
+    ],
+    "shift": [
+        {"keys": list("QWERTYUIOP"), "pad": 0},
+        {"keys": list("ASDFGHJKL"), "pad": 2},
+        {"keys": list("ZXCVBNM"), "pad": 4},
+    ],
+    "symbols": [
+        {"keys": list("1234567890"), "pad": 0},
+        {"keys": list("!@#$%^&*()"), "pad": 0},
+        {"keys": ["-", "_", "=", "+", "[", "]", "{", "}", "\\", "|"], "pad": 0},
+        {"keys": [";", ":", "'", "\"", ",", ".", "/", "?", "`", "~"], "pad": 0},
+    ],
+}
 
 
 def script_defaults_file():
@@ -600,8 +612,8 @@ class ProvisioningWizard(tk.Tk):
         self.wifi_ssids = []
         self.wifi_scan_message = ""
         self._focused_entry = None
-        self._keyboard_shift = False
-        self._keyboard_key_buttons = []
+        self._keyboard_mode = "letters"
+        self._keyboard_rows_frame = None
         self._last_wifi_test_signature = None
 
         self.answers = {
@@ -724,23 +736,42 @@ class ProvisioningWizard(tk.Tk):
         )
 
     def _build_touch_keyboard(self):
-        for row_index, keys in enumerate(TOUCH_KEYBOARD_ROWS):
-            row = tk.Frame(self.keyboard, bg=ENTRY_BG)
-            row.pack(anchor="center", pady=2)
-            for key in keys:
-                button = self._make_keyboard_button(
-                    row, key, lambda value=key: self._keyboard_insert(value)
-                )
-                button.pack(side="left", padx=2)
-                self._keyboard_key_buttons.append((button, key))
+        self._keyboard_rows_frame = tk.Frame(self.keyboard, bg=ENTRY_BG)
+        self._keyboard_rows_frame.pack(anchor="center", fill="x")
+        self._render_touch_keyboard()
 
-        controls = tk.Frame(self.keyboard, bg=ENTRY_BG)
+    def _render_touch_keyboard(self):
+        for child in self._keyboard_rows_frame.winfo_children():
+            child.destroy()
+
+        for spec in TOUCH_KEYBOARD_LAYOUTS[self._keyboard_mode]:
+            row = tk.Frame(self._keyboard_rows_frame, bg=ENTRY_BG)
+            row.pack(anchor="center", pady=2)
+            if spec.get("pad", 0):
+                tk.Frame(row, width=spec["pad"] * 18, bg=ENTRY_BG).pack(side="left")
+            for key in spec["keys"]:
+                self._make_keyboard_button(
+                    row, key, lambda value=key: self._keyboard_insert(value)
+                ).pack(side="left", padx=2)
+
+        controls = tk.Frame(self._keyboard_rows_frame, bg=ENTRY_BG)
         controls.pack(anchor="center", pady=(4, 0))
+
+        if self._keyboard_mode == "symbols":
+            self._make_keyboard_button(
+                controls, "ABC", self._keyboard_show_letters, width=7
+            ).pack(side="left", padx=3)
+        else:
+            shift_text = "Shift" if self._keyboard_mode == "letters" else "SHIFT"
+            self._make_keyboard_button(
+                controls, shift_text, self._keyboard_toggle_shift, width=7
+            ).pack(side="left", padx=3)
+            self._make_keyboard_button(
+                controls, "?123", self._keyboard_show_symbols, width=7
+            ).pack(side="left", padx=3)
+
         self._make_keyboard_button(
-            controls, "Shift", self._keyboard_toggle_shift, width=7
-        ).pack(side="left", padx=3)
-        self._make_keyboard_button(
-            controls, "Space", lambda: self._keyboard_insert(" "), width=10
+            controls, "Space", lambda: self._keyboard_insert(" "), width=18
         ).pack(side="left", padx=3)
         self._make_keyboard_button(
             controls, "Backspace", self._keyboard_backspace, width=10
@@ -762,16 +793,21 @@ class ProvisioningWizard(tk.Tk):
             self.keyboard.pack_forget()
 
     def _keyboard_toggle_shift(self):
-        self._keyboard_shift = not self._keyboard_shift
-        for button, key in self._keyboard_key_buttons:
-            button.config(text=key.upper() if self._keyboard_shift and key.isalpha() else key)
+        self._keyboard_mode = "shift" if self._keyboard_mode == "letters" else "letters"
+        self._render_touch_keyboard()
+
+    def _keyboard_show_symbols(self):
+        self._keyboard_mode = "symbols"
+        self._render_touch_keyboard()
+
+    def _keyboard_show_letters(self):
+        self._keyboard_mode = "letters"
+        self._render_touch_keyboard()
 
     def _keyboard_insert(self, value):
         entry = self._focused_entry
         if not entry or not entry.winfo_exists():
             return
-        if self._keyboard_shift and value.isalpha():
-            value = value.upper()
         entry.insert(tk.INSERT, value)
         entry.focus_set()
 
