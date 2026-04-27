@@ -706,7 +706,7 @@ class ProvisioningWizard(tk.Tk):
         if terminal:
             command = (
                 f"cd {shlex.quote(str(backend.parent))} && "
-                f"sudo {shlex.quote(str(backend))} --answers {shlex.quote(str(self.output_path))}; "
+                f"sudo bash {shlex.quote(str(backend))} --answers {shlex.quote(str(self.output_path))}; "
                 "status=$?; echo; "
                 "echo \"Provisioning exited with status ${status}. Press Enter to close.\"; "
                 "read -r _; exit ${status}"
@@ -714,7 +714,7 @@ class ProvisioningWizard(tk.Tk):
             args = [terminal, "-e", "bash", "-lc", command]
             launched_in_terminal = True
         else:
-            args = ["sudo", str(backend), "--answers", str(self.output_path)]
+            args = ["sudo", "bash", str(backend), "--answers", str(self.output_path)]
 
         try:
             subprocess.Popen(args)
