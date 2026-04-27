@@ -881,7 +881,7 @@ EOF
 Type=Application
 Name=Homebase NVMe Provisioning
 Comment=Run NVMe provisioning on boot
-Exec=bash -lc "cd /home/provision/homebase_setup/hb-clients/provision && DEVICE_DEFAULTS_GROUP=${defaults_group} ./provision_nvme_gui.py"
+Exec=bash -lc "cd /home/provision/homebase_setup && DEVICE_DEFAULTS_GROUP=${defaults_group} python3 ./provision_nvme_gui.py"
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
@@ -892,9 +892,9 @@ EOF
   git clone --depth 1 https://github.com/ngage-systems/provision.git "$repo_dir"
 
   # Ensure script is executable and ownership is correct.
-  chmod +x "${repo_dir}/hb-clients/provision/full_provision_nvme.sh" || true
-  chmod +x "${repo_dir}/hb-clients/provision/provision_nvme.sh" || true
-  chmod +x "${repo_dir}/hb-clients/provision/provision_nvme_gui.py" || true
+  chmod +x "${repo_dir}/provision_emmc_for_nvme_fallback.sh" || true
+  chmod +x "${repo_dir}/provision_nvme.sh" || true
+  chmod +x "${repo_dir}/provision_nvme_gui.py" || true
   chown -R 1000:1000 "$home_dir"
 
   if [[ "$rotate_choice" == "yes" ]]; then
