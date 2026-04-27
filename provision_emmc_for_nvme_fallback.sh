@@ -40,6 +40,76 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+detect_touchscreen() {
+  local usb_output="$1"
+  echo "$usb_output" | grep -Ei 'ID (0eef:c002|222a:0001)' | sed -n '1p'
+}
+
+detect_juicer() {
+  local usb_output="$1"
+  echo "$usb_output" | grep -i 'juicer' | sed -n '1p'
+}
+
+detect_power_monitor() {
+  compgen -G "/dev/serial/by-id/usb-Homebase_power_monitor_*-if00" | sed -n '1p'
+}
+
+detect_camera() {
+  local camera_output="$1"
+  echo "$camera_output" | grep -E '^[[:space:]]*[0-9]+[[:space:]]*:' | sed -n '1p'
+}
+
+print_accessory_result() {
+  local label="$1"
+  local detail="$2"
+  local missing_detail="$3"
+
+  if [[ -n "$detail" ]]; then
+    printf '  %-15s detected (%s)\n' "${label}:" "$detail" >&2
+  else
+    printf '  %-15s not detected (%s)\n' "${label}:" "$missing_detail" >&2
+  fi
+}
+
+check_accessories_and_acknowledge() {
+  local usb_output=""
+  local touchscreen="" juicer="" power_monitor="" camera=""
+  local touchscreen_missing="USB touchscreen controller 0eef:c002 or 222a:0001 not found"
+  local juicer_missing="USB device containing 'juicer' not found"
+  local power_monitor_missing="/dev/serial/by-id/usb-Homebase_power_monitor_*-if00 not found"
+  local camera_missing="No cameras reported by rpicam-hello --list-cameras"
+
+  if have_cmd lsusb; then
+    usb_output="$(lsusb 2>/dev/null || true)"
+    touchscreen="$(detect_touchscreen "$usb_output" || true)"
+    juicer="$(detect_juicer "$usb_output" || true)"
+  else
+    touchscreen_missing="Missing command: lsusb"
+    juicer_missing="Missing command: lsusb"
+  fi
+
+  power_monitor="$(detect_power_monitor || true)"
+
+  if have_cmd rpicam-hello; then
+    local camera_output
+    camera_output="$(rpicam-hello --list-cameras 2>&1 || true)"
+    camera="$(detect_camera "$camera_output" || true)"
+    if [[ -z "$camera" && -n "$camera_output" ]]; then
+      camera_missing="$(echo "$camera_output" | sed -n '1p')"
+    fi
+  else
+    camera_missing="Missing command: rpicam-hello"
+  fi
+
+  printf '\nAccessory checks:\n' >&2
+  print_accessory_result "Touchscreen" "$touchscreen" "$touchscreen_missing"
+  print_accessory_result "Juicer" "$juicer" "$juicer_missing"
+  print_accessory_result "Power monitor" "$power_monitor" "$power_monitor_missing"
+  print_accessory_result "Camera" "$camera" "$camera_missing"
+  printf '\n' >&2
+  read -r -p "Press Enter to continue after reviewing accessory checks." _
+}
+
 ini_list_sections() {
   local file="$1"
   awk '
@@ -876,6 +946,8 @@ main() {
     die "No internet connectivity. Connect Ethernet or provide Wi-Fi credentials and re-run."
   fi
   log "Internet connectivity verified."
+
+  check_accessories_and_acknowledge
 
   local root_src root_dev
   root_src="$(root_source)"
