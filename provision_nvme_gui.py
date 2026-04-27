@@ -659,7 +659,6 @@ class ProvisioningWizard(tk.Tk):
     def _build_layout(self):
         self.keyboard = tk.Frame(self, bg=ENTRY_BG, padx=18, pady=10)
         self._build_touch_keyboard()
-        self.bind_all("<Button-1>", self._hide_keyboard_on_non_entry_tap, add="+")
 
         self.nav = tk.Frame(self, bg=BG, padx=40, pady=10)
         self.nav.pack(side="bottom", fill="x")
@@ -762,19 +761,6 @@ class ProvisioningWizard(tk.Tk):
         if self.keyboard.winfo_manager():
             self.keyboard.pack_forget()
 
-    def _is_descendant(self, widget, ancestor):
-        while widget is not None:
-            if widget == ancestor:
-                return True
-            widget = getattr(widget, "master", None)
-        return False
-
-    def _hide_keyboard_on_non_entry_tap(self, event):
-        widget = event.widget
-        if isinstance(widget, tk.Entry) or self._is_descendant(widget, self.keyboard):
-            return
-        self._hide_touch_keyboard()
-
     def _keyboard_toggle_shift(self):
         self._keyboard_shift = not self._keyboard_shift
         for button, key in self._keyboard_key_buttons:
@@ -815,6 +801,7 @@ class ProvisioningWizard(tk.Tk):
             child.destroy()
 
     def _render_current_step(self):
+        self._hide_touch_keyboard()
         self._clear_content()
         step_name = self.steps[self.step_index].__name__
         self.progress_label.config(
@@ -1034,7 +1021,8 @@ class ProvisioningWizard(tk.Tk):
         dialog.configure(bg=BG)
         dialog.transient(self)
         dialog.grab_set()
-        dialog.geometry("620x180+330+220")
+        dialog.geometry("760x220+260+180")
+        dialog.minsize(640, 200)
         tk.Label(
             dialog,
             text=title,
@@ -1049,7 +1037,8 @@ class ProvisioningWizard(tk.Tk):
             fg=FG,
             font=FONT_LABEL,
             justify="left",
-        ).pack(anchor="w", padx=30, pady=(0, 25))
+            wraplength=680,
+        ).pack(anchor="w", fill="x", padx=30, pady=(0, 25))
         dialog.update_idletasks()
         return dialog
 
@@ -1321,6 +1310,7 @@ class ProvisioningWizard(tk.Tk):
 
     def _on_ssid_list_select(self, _event):
         self._wifi_ssid_var.set(self._ssid_list_var.get())
+        self.btn_next.focus_set()
 
     def _step_wifi_password(self):
         ssid = self.answers.get("wifi_ssid", "")
