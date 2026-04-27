@@ -31,6 +31,7 @@ ACCENT = "#89b4fa"
 ACCENT_ACTIVE = "#74a0e8"
 ENTRY_BG = "#313244"
 ERROR = "#f38ba8"
+SUCCESS = "#a6e3a1"
 MUTED = "#a6adc8"
 
 FONT_TITLE = ("DejaVu Sans", 22, "bold")
@@ -47,6 +48,12 @@ DEFAULT_MONITOR_DISTANCE_CM = "30.0"
 DEFAULT_SCREEN_ROTATION = "0"
 DEFAULT_OUTPUT = "/tmp/hb_provision_answers.json"
 WIFI_SCAN_FILE = os.environ.get("HB_WIFI_SCAN_FILE", "/tmp/hb_wifi_scan_ssids.txt")
+ACCESSORY_CHECK_ITEMS = [
+    ("touchscreen", "Touchscreen"),
+    ("juicer", "Juicer"),
+    ("power_monitor", "Power monitor"),
+    ("camera", "Camera"),
+]
 
 
 def script_defaults_file():
@@ -132,6 +139,72 @@ def run_command(cmd, timeout=30, env=None):
             exc.stdout or "",
             exc.stderr or f"Timed out running: {' '.join(cmd)}",
         )
+
+
+def accessory_result(detected, detail):
+    return {"detected": bool(detected), "detail": detail}
+
+
+def detect_touchscreen(lsusb_output):
+    for line in lsusb_output.splitlines():
+        if re.search(r"\bID\s+(0eef:c002|222a:0001)\b", line, re.IGNORECASE):
+            return accessory_result(True, line.strip())
+    return accessory_result(False, "USB touchscreen controller 0eef:c002 or 222a:0001 not found.")
+
+
+def detect_juicer(lsusb_output):
+    for line in lsusb_output.splitlines():
+        if re.search(r"juicer", line, re.IGNORECASE):
+            return accessory_result(True, line.strip())
+    return accessory_result(False, "USB device containing 'juicer' not found.")
+
+
+def detect_power_monitor():
+    serial_dir = Path("/dev/serial/by-id")
+    matches = sorted(serial_dir.glob("usb-Homebase_power_monitor_*-if00")) if serial_dir.is_dir() else []
+    if matches:
+        return accessory_result(True, str(matches[0]))
+    return accessory_result(False, "/dev/serial/by-id/usb-Homebase_power_monitor_*-if00 not found.")
+
+
+def detect_camera():
+    result = run_command(["rpicam-hello", "--list-cameras"], timeout=10)
+    output = "\n".join(part.strip() for part in [result.stdout, result.stderr] if part and part.strip())
+    if result.returncode == 127:
+        return accessory_result(False, result.stderr.strip())
+
+    camera_lines = [
+        line.strip()
+        for line in output.splitlines()
+        if re.match(r"^\s*\d+\s*:", line)
+    ]
+    if result.returncode == 0 and camera_lines:
+        return accessory_result(True, camera_lines[0])
+    if output:
+        detail = output.splitlines()[0].strip()
+    else:
+        detail = "No cameras reported by rpicam-hello --list-cameras."
+    return accessory_result(False, detail)
+
+
+def check_accessories():
+    lsusb_result = run_command(["lsusb"], timeout=5)
+    lsusb_output = lsusb_result.stdout if lsusb_result.returncode == 0 else ""
+    missing_lsusb = lsusb_result.returncode == 127
+
+    if missing_lsusb:
+        touchscreen = accessory_result(False, lsusb_result.stderr.strip())
+        juicer = accessory_result(False, lsusb_result.stderr.strip())
+    else:
+        touchscreen = detect_touchscreen(lsusb_output)
+        juicer = detect_juicer(lsusb_output)
+
+    return {
+        "touchscreen": touchscreen,
+        "juicer": juicer,
+        "power_monitor": detect_power_monitor(),
+        "camera": detect_camera(),
+    }
 
 
 def have_internet():
@@ -461,6 +534,7 @@ class ProvisioningWizard(tk.Tk):
             self._step_wifi_country,
             self._step_wifi_ssid,
             self._step_wifi_password,
+            self._step_accessory_checks,
             self._step_timezone,
             self._step_locale,
             self._step_screen_width,
@@ -494,8 +568,15 @@ class ProvisioningWizard(tk.Tk):
         self.btn_back = self._make_button(self.nav, "< Back", self._on_back)
         self.btn_back.pack(side="left")
 
-        self.btn_next = self._make_button(self.nav, "Next >", self._on_next, primary=True)
-        self.btn_next.pack(side="right")
+        self.nav_right = tk.Frame(self.nav, bg=BG)
+        self.nav_right.pack(side="right")
+
+        self.btn_recheck_accessories = self._make_button(
+            self.nav_right, "Recheck Accessories", self._recheck_accessories
+        )
+
+        self.btn_next = self._make_button(self.nav_right, "Next >", self._on_next, primary=True)
+        self.btn_next.pack(side="left")
 
         self.progress_label = tk.Label(
             self.nav, text="", bg=BG, fg=FG, font=FONT_LABEL
@@ -528,6 +609,7 @@ class ProvisioningWizard(tk.Tk):
 
     def _render_current_step(self):
         self._clear_content()
+        step_name = self.steps[self.step_index].__name__
         self.progress_label.config(
             text=f"Step {self.step_index + 1} of {len(self.steps)}"
         )
@@ -535,6 +617,12 @@ class ProvisioningWizard(tk.Tk):
         self.btn_next.config(
             text="Finish" if self.step_index == len(self.steps) - 1 else "Next >"
         )
+        if step_name == "_step_accessory_checks":
+            self.btn_recheck_accessories.pack(
+                side="left", padx=(0, 15), before=self.btn_next
+            )
+        else:
+            self.btn_recheck_accessories.pack_forget()
         self.steps[self.step_index]()
 
     def _next_index(self, index):
@@ -569,6 +657,10 @@ class ProvisioningWizard(tk.Tk):
     def _on_back(self):
         if self.step_index > 0:
             self.step_index = self._previous_index(self.step_index)
+            self._render_current_step()
+
+    def _recheck_accessories(self):
+        if self.steps[self.step_index].__name__ == "_step_accessory_checks":
             self._render_current_step()
 
     def _on_finish(self):
@@ -1001,6 +1093,14 @@ class ProvisioningWizard(tk.Tk):
         )
         entry.focus_set()
 
+    def _step_accessory_checks(self):
+        self._add_title("Accessory checks")
+        self._add_label(
+            "These checks confirm the expected accessories are visible from the current system. "
+            "Missing accessories are shown as warnings and do not block provisioning."
+        )
+        self._run_accessory_checks()
+
     def _step_hostname(self):
         self._add_title("Name this device")
         self._add_label(
@@ -1053,6 +1153,88 @@ class ProvisioningWizard(tk.Tk):
         )
         entry.focus_set()
 
+    def _run_accessory_checks(self):
+        dialog = self._show_busy_dialog(
+            "Checking accessories",
+            "Looking for touchscreen, juicer, power monitor, and camera.",
+        )
+        try:
+            self.answers["accessory_checks"] = check_accessories()
+        finally:
+            dialog.grab_release()
+            dialog.destroy()
+            self.update_idletasks()
+        self._render_accessory_results()
+
+    def _render_accessory_results(self):
+        results = self.answers.get("accessory_checks", {})
+        scroll_shell = tk.Frame(self.content, bg=ENTRY_BG)
+        scroll_shell.pack(fill="both", expand=True, pady=(10, 0))
+
+        canvas = tk.Canvas(
+            scroll_shell,
+            bg=ENTRY_BG,
+            highlightthickness=0,
+            height=230,
+        )
+        scrollbar = tk.Scrollbar(scroll_shell, orient="vertical", command=canvas.yview)
+        rows = tk.Frame(canvas, bg=ENTRY_BG, padx=20, pady=15)
+
+        rows_window = canvas.create_window((0, 0), window=rows, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def update_scroll_region(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def update_inner_width(event):
+            canvas.itemconfigure(rows_window, width=event.width)
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        rows.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", update_inner_width)
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        canvas.bind("<Button-4>", lambda _event: canvas.yview_scroll(-1, "units"))
+        canvas.bind("<Button-5>", lambda _event: canvas.yview_scroll(1, "units"))
+
+        for key, label in ACCESSORY_CHECK_ITEMS:
+            result = results.get(key, {})
+            detected = bool(result.get("detected"))
+            detail = result.get("detail", "")
+            row = tk.Frame(rows, bg=ENTRY_BG)
+            row.pack(fill="x", pady=4)
+            tk.Label(
+                row,
+                text=label,
+                bg=ENTRY_BG,
+                fg=FG,
+                font=FONT_LABEL,
+                width=18,
+                anchor="w",
+            ).pack(side="left")
+            tk.Label(
+                row,
+                text="Detected" if detected else "Not detected",
+                bg=ENTRY_BG,
+                fg=SUCCESS if detected else ERROR,
+                font=FONT_LABEL,
+                width=14,
+                anchor="w",
+            ).pack(side="left")
+            tk.Label(
+                row,
+                text=detail,
+                bg=ENTRY_BG,
+                fg=MUTED,
+                font=FONT_LABEL,
+                anchor="w",
+                wraplength=760,
+                justify="left",
+            ).pack(side="left", fill="x", expand=True)
+
     def _step_review(self):
         self._add_title("Review setup")
         self._add_label("Check these settings before starting provisioning.")
@@ -1097,6 +1279,7 @@ class ProvisioningWizard(tk.Tk):
             ("Screen", self._screen_summary()),
             ("Wi-Fi SSID", self.answers.get("wifi_ssid", "(skipped)") or "(skipped)"),
             ("Wi-Fi test", self._wifi_test_summary()),
+            ("Accessory checks", self._accessory_check_summary()),
             ("Hostname", self.answers.get("hostname", "")),
             ("Username", self.answers.get("username", "")),
             ("Password", self.answers.get("password", "")),
@@ -1150,6 +1333,25 @@ class ProvisioningWizard(tk.Tk):
         if not self.answers.get("wifi_tested"):
             return "Not tested"
         return "Failed"
+
+    def _accessory_check_summary(self):
+        checks = self.answers.get("accessory_checks", {})
+        if not checks:
+            return "Not checked"
+        detected = [
+            label
+            for key, label in ACCESSORY_CHECK_ITEMS
+            if checks.get(key, {}).get("detected")
+        ]
+        missing = [
+            label
+            for key, label in ACCESSORY_CHECK_ITEMS
+            if not checks.get(key, {}).get("detected")
+        ]
+        summary = f"{len(detected)}/{len(ACCESSORY_CHECK_ITEMS)} detected"
+        if missing:
+            summary += f"; missing: {', '.join(missing)}"
+        return summary
 
     # ------------------------------------------------------------------
     # Validation
