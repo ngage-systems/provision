@@ -645,9 +645,11 @@ class ProvisioningWizard(tk.Tk):
     def _configure_window_size(self):
         screen_w = max(1, self.winfo_screenwidth())
         screen_h = max(1, self.winfo_screenheight())
-        width = min(1280, screen_w)
-        height = min(800, screen_h)
-        self.geometry(f"{width}x{height}+0+0")
+        margin_x = 20 if screen_w > 800 else 0
+        margin_y = 60 if screen_h > 480 else 0
+        width = min(1280, max(640, screen_w - margin_x))
+        height = min(800, max(420, screen_h - margin_y))
+        self.geometry(f"{width}x{height}+10+10")
         self.minsize(min(760, width), min(420, height))
 
     # ------------------------------------------------------------------
@@ -655,20 +657,12 @@ class ProvisioningWizard(tk.Tk):
     # navigation stays pinned to the bottom of the window.
     # ------------------------------------------------------------------
     def _build_layout(self):
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=0)
-        self.grid_rowconfigure(2, weight=0)
-
-        self.content = tk.Frame(self, bg=BG, padx=40, pady=30)
-        self.content.grid(row=0, column=0, sticky="nsew")
-
         self.keyboard = tk.Frame(self, bg=ENTRY_BG, padx=18, pady=10)
         self._build_touch_keyboard()
         self.bind_all("<Button-1>", self._hide_keyboard_on_non_entry_tap, add="+")
 
         self.nav = tk.Frame(self, bg=BG, padx=40, pady=10)
-        self.nav.grid(row=2, column=0, sticky="ew")
+        self.nav.pack(side="bottom", fill="x")
 
         self.btn_back = self._make_button(self.nav, "< Back", self._on_back)
         self.btn_back.pack(side="left")
@@ -687,6 +681,10 @@ class ProvisioningWizard(tk.Tk):
             self.nav, text="", bg=BG, fg=FG, font=FONT_LABEL
         )
         self.progress_label.pack(side="top", pady=5)
+        self.nav.update_idletasks()
+
+        self.content = tk.Frame(self, bg=BG, padx=40, pady=30)
+        self.content.pack(side="top", fill="both", expand=True)
 
     def _make_button(self, parent, text, command, primary=False):
         bg = ACCENT if primary else ENTRY_BG
@@ -758,11 +756,11 @@ class ProvisioningWizard(tk.Tk):
     def _show_touch_keyboard(self, entry):
         self._focused_entry = entry
         if not self.keyboard.winfo_ismapped():
-            self.keyboard.grid(row=1, column=0, sticky="ew")
+            self.keyboard.pack(side="bottom", fill="x", before=self.nav)
 
     def _hide_touch_keyboard(self):
         if self.keyboard.winfo_manager():
-            self.keyboard.grid_remove()
+            self.keyboard.pack_forget()
 
     def _is_descendant(self, widget, ancestor):
         while widget is not None:
