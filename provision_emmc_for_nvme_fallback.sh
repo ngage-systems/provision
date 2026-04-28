@@ -418,6 +418,37 @@ prompt_hostname_fallback() {
   done
 }
 
+prompt_rotate_display() {
+  local rotate_choice="${HB_ROTATE_180:-}"
+  if [[ -n "$rotate_choice" ]]; then
+    case "$rotate_choice" in
+      yes|no)
+        echo "$rotate_choice"
+        return 0
+        ;;
+      y|Y|true|TRUE|1)
+        echo "yes"
+        return 0
+        ;;
+      n|N|false|FALSE|0)
+        echo "no"
+        return 0
+        ;;
+      *)
+        die "Invalid HB_ROTATE_180 value '$rotate_choice' (expected yes/no)."
+        ;;
+    esac
+  fi
+
+  local ans=""
+  read -r -p "Rotate display 180 degrees at 1280x800? [y/N]: " ans
+  if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
 root_source() {
   need_cmd findmnt
   local src
@@ -802,6 +833,7 @@ write_fallback_config() {
   local root_mnt="$2"
   local hostname="$3"
   local defaults_group="$4"
+  local rotate_choice="$5"
 
   log "Configuring fallback OS (user/autostart/sudo)..."
 
@@ -823,12 +855,6 @@ write_fallback_config() {
     cmdline_rotate="${boot_mnt}/cmdline.txt"
   elif [[ -f "${boot_mnt}/firmware/cmdline.txt" ]]; then
     cmdline_rotate="${boot_mnt}/firmware/cmdline.txt"
-  fi
-  local rotate_choice="${HB_ROTATE_180:-}"
-  if [[ -z "$rotate_choice" ]]; then
-    local ans=""
-    read -r -p "Rotate display 180 degrees at 1280x800? [y/N]: " ans
-    [[ "$ans" == "y" || "$ans" == "Y" ]] && rotate_choice="yes" || rotate_choice="no"
   fi
   if [[ "$rotate_choice" == "yes" ]]; then
     if [[ -n "$cmdline_rotate" ]]; then
@@ -967,6 +993,15 @@ main() {
 
   confirm_erase_device "$fallback_dev"
 
+  local defaults_group
+  defaults_group="$(prompt_org_group)"
+
+  local hostname
+  hostname="$(prompt_hostname_fallback)"
+
+  local rotate_choice
+  rotate_choice="$(prompt_rotate_display)"
+
   install_packages
 
   local xz_path="/tmp/raspios_arm64_latest.img.xz"
@@ -989,12 +1024,7 @@ main() {
   trap 'cleanup_mounts "${HB_BOOT_MNT:-}" "${HB_ROOT_MNT:-}"' EXIT
   mount_fallback_partitions_for_config "$boot_part" "$root_part" "$HB_BOOT_MNT" "$HB_ROOT_MNT"
 
-  local defaults_group
-  defaults_group="$(prompt_org_group)"
-
-  local hostname
-  hostname="$(prompt_hostname_fallback)"
-  write_fallback_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$hostname" "$defaults_group"
+  write_fallback_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$hostname" "$defaults_group" "$rotate_choice"
 
   cleanup_mounts "$HB_BOOT_MNT" "$HB_ROOT_MNT"
   trap - EXIT
