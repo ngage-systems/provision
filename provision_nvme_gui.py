@@ -709,15 +709,15 @@ class ProvisioningWizard(tk.Tk):
             self._step_timezone,
             self._step_locale,
             self._step_screen_width,
+            self._step_monitor_width,
             self._step_screen_height,
+            self._step_monitor_height,
+            self._step_monitor_distance,
             self._step_screen_refresh_rate,
             self._step_screen_rotation,
             self._step_hostname,
             self._step_username,
             self._step_password,
-            self._step_monitor_width,
-            self._step_monitor_height,
-            self._step_monitor_distance,
             self._step_review,
         ]
         self.step_index = 0
@@ -1593,16 +1593,21 @@ class ProvisioningWizard(tk.Tk):
         rows = [
             ("Defaults", self.answers.get("defaults_section", "(skipped)")),
             ("Wi-Fi country", self.answers.get("wifi_country", "")),
-            ("Timezone", self.answers.get("timezone", "")),
-            ("Locale", self.answers.get("locale", "")),
-            ("Screen", self._screen_summary()),
             ("Wi-Fi SSID", self.answers.get("wifi_ssid", "(skipped)") or "(skipped)"),
             ("Wi-Fi test", self._wifi_test_summary()),
             ("Accessory checks", self._accessory_check_summary()),
+            ("Timezone", self.answers.get("timezone", "")),
+            ("Locale", self.answers.get("locale", "")),
+            ("Screen width (px)", self.answers.get("screen_pixels_width", "")),
+            ("Monitor width (cm)", self.answers.get("monitor_width_cm", "")),
+            ("Screen height (px)", self.answers.get("screen_pixels_height", "")),
+            ("Monitor height (cm)", self.answers.get("monitor_height_cm", "")),
+            ("Viewing distance (cm)", self.answers.get("monitor_distance_cm", "")),
+            ("Refresh rate (Hz)", self.answers.get("screen_refresh_rate", "")),
+            ("Screen rotation", self.answers.get("screen_rotation", "")),
             ("Hostname", self.answers.get("hostname", "")),
             ("Username", self.answers.get("username", "")),
             ("Password", self.answers.get("password", "")),
-            ("Monitor", self._monitor_summary()),
         ]
         for label, value in rows:
             row = tk.Frame(review_frame, bg=ENTRY_BG)
@@ -1613,7 +1618,7 @@ class ProvisioningWizard(tk.Tk):
                 bg=ENTRY_BG,
                 fg=FG,
                 font=FONT_LABEL,
-                width=14,
+                width=22,
                 anchor="w",
             ).pack(side="left")
             tk.Label(
@@ -1624,21 +1629,6 @@ class ProvisioningWizard(tk.Tk):
                 font=FONT_LABEL,
                 anchor="w",
             ).pack(side="left", fill="x", expand=True)
-
-    def _screen_summary(self):
-        width = self.answers.get("screen_pixels_width", "")
-        height = self.answers.get("screen_pixels_height", "")
-        rate = self.answers.get("screen_refresh_rate", "")
-        rotation = self.answers.get("screen_rotation", "")
-        if not (width and height and rate):
-            return "(skipped)"
-        return f"{width}x{height} @ {rate} Hz, rotation {rotation}"
-
-    def _monitor_summary(self):
-        width = self.answers.get("monitor_width_cm", "")
-        height = self.answers.get("monitor_height_cm", "")
-        distance = self.answers.get("monitor_distance_cm", "")
-        return f"{width} x {height} cm, distance {distance} cm"
 
     def _wifi_test_summary(self):
         if not self.answers.get("wifi_ssid"):

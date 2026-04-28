@@ -12,7 +12,7 @@ set -euo pipefail
 # - Flash Raspberry Pi OS Lite arm64 to NVMe and expand the root filesystem
 # - Configure headless settings: SSH, user, hostname, Wi-Fi, timezone, locale
 # - Configure display mode/rotation and monitor geometry
-# - Install stim2/dserv/dlsh + ESS repo in NVMe rootfs
+# - Install dserv stack + ESS repo in NVMe rootfs
 # - Enable services, kiosk settings, and seatd (with stim2 startup delay)
 # - Save full log to /var/log/provision/provision_nvme_YYYYMMDD_HHMMSS.log on NVMe rootfs
 # - Configure EEPROM boot order to prefer NVMe
@@ -1815,7 +1815,7 @@ configure_nvme_packages_and_services() {
 
   chroot_cmd /usr/bin/apt-get install -y \
     locales build-essential cmake libevdev-dev libpq-dev libcamera-apps screen git \
-    ca-certificates wget cage labwc libtcl9.0 raspi-config lightdm seatd \
+    ca-certificates curl jq unzip wget cage labwc libtcl9.0 raspi-config lightdm seatd \
     || die "Failed to install packages in NVMe rootfs."
 
   if [[ -n "$locale" ]]; then
@@ -1901,160 +1901,23 @@ screen_set DistanceToMonitor   ${MONITOR_DISTANCE_CM}
 EOF
 }
 
-install_stim2_latest_root() {
+install_dserv_stack_root() {
   local root_mnt="$1"
-  local tmp_dir url deb_path arch all_debs os_codename release_json
-  tmp_dir="$(mktemp -d)"
-  trap '[[ -n "${tmp_dir:-}" ]] && rm -rf "$tmp_dir"' RETURN
+  local registry_url="${DEFAULT_MESH_HOST:-https://dserv.net}"
+  local workgroup="${DEFAULT_MESH_WORKGROUP:-brown-sheinberg}"
+  registry_url="${registry_url%/}"
 
-  os_codename="$(read_os_codename_from_root "$root_mnt")"
-  case "$os_codename" in
-    bookworm|trixie)
-      ;;
-    "")
-      die "Could not determine OS codename for stim2 package selection in NVMe rootfs"
-      ;;
-    *)
-      die "Unsupported OS codename '$os_codename' for stim2 package selection"
-      ;;
-  esac
-
-  arch="$(dpkg --print-architecture)"
-  case "$arch" in
-    arm64)
-      deb_path="$tmp_dir/stim2_latest_arm64.deb"
-      release_json="$(wget -qO- https://api.github.com/repos/SheinbergLab/stim2/releases/latest || true)"
-      if [[ -z "$release_json" ]]; then
-        die "Failed to fetch stim2 release metadata from GitHub API"
-      fi
-      if echo "$release_json" | grep -q "API rate limit exceeded"; then
-        die "GitHub API rate limit exceeded; try again later or use a cached .deb"
-      fi
-      all_debs="$(
-        echo "$release_json" \
-          | grep -o '"browser_download_url":[^"]*"[^"]*\.deb"' \
-          | cut -d '"' -f 4
-      )"
-      url="$(echo "$all_debs" | grep -m 1 -E "stim2_.*_arm64_${os_codename}\.deb" || true)"
-      if [[ -z "$url" ]]; then
-        die "Could not find stim2 arm64 ${os_codename} .deb in latest release"
-      fi
-      ;;
-    *)
-      die "Unsupported architecture '$arch' (stim2 release .deb expected for arm64)"
-      ;;
-  esac
-
-  log "Downloading stim2 from $url"
-  wget -O "$deb_path" "$url"
-
-  install -d "${root_mnt}/tmp"
-  cp "$deb_path" "${root_mnt}/tmp/stim2_latest.deb"
+  log "Installing dserv stack from ${registry_url}/setup for workgroup '${workgroup}'..."
 
   mount_chroot_env "$root_mnt"
-  local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
-  chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/dpkg -i /tmp/stim2_latest.deb || true
-  chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/apt-get -y -f install
+  trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
+  local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive DSERV_BOOTSTRAP_FORCE=1)
+  chroot "$root_mnt" "${chroot_env[@]}" /bin/bash -c \
+    'curl -sSL "$1" | bash -s -- --workgroup "$2"' \
+    _ "${registry_url}/setup" "$workgroup" \
+    || die "Failed to install dserv stack in NVMe rootfs."
   unmount_chroot_env "$root_mnt"
-}
-
-install_dserv_latest_root() {
-  local root_mnt="$1"
-  local tmp_dir url deb_path arch release_json all_debs
-  tmp_dir="$(mktemp -d)"
-  trap '[[ -n "${tmp_dir:-}" ]] && rm -rf "$tmp_dir"' RETURN
-
-  arch="$(dpkg --print-architecture)"
-  case "$arch" in
-    arm64)
-      deb_path="$tmp_dir/dserv_latest_arm64.deb"
-      release_json="$(wget -qO- https://api.github.com/repos/SheinbergLab/dserv/releases/latest || true)"
-      if [[ -z "$release_json" ]]; then
-        die "Failed to fetch dserv release metadata from GitHub API"
-      fi
-      if echo "$release_json" | grep -q "API rate limit exceeded"; then
-        die "GitHub API rate limit exceeded; try again later or use a cached .deb"
-      fi
-      all_debs="$(
-        echo "$release_json" \
-          | grep -o '"browser_download_url":[^"]*"[^"]*\.deb"' \
-          | cut -d '"' -f 4
-      )"
-      url="$(echo "$all_debs" | grep -m 1 -E 'dserv_.*_arm64\.deb' || true)"
-      ;;
-    *)
-      die "Unsupported architecture '$arch' (dserv release .deb expected for arm64)"
-      ;;
-  esac
-
-  [[ -n "$url" ]] || die "Could not find dserv arm64 .deb in latest release"
-
-  log "Downloading dserv from $url"
-  wget -O "$deb_path" "$url"
-
-  install -d "${root_mnt}/tmp"
-  cp "$deb_path" "${root_mnt}/tmp/dserv_latest.deb"
-
-  mount_chroot_env "$root_mnt"
-  local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
-  chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/dpkg -i /tmp/dserv_latest.deb || true
-  chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/apt-get -y -f install
-  unmount_chroot_env "$root_mnt"
-
-  if [[ -f "${root_mnt}/usr/local/dserv/local/post-pins.tcl.EXAMPLE" ]]; then
-    cp -n "${root_mnt}/usr/local/dserv/local/post-pins.tcl.EXAMPLE" "${root_mnt}/usr/local/dserv/local/post-pins.tcl" || true
-  fi
-  if [[ -f "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" ]]; then
-    cp -n "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" "${root_mnt}/usr/local/dserv/local/sound.tcl" || true
-  fi
-  if [[ -f "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" ]]; then
-    local mesh_target="${root_mnt}/usr/local/dserv/local/mesh.tcl"
-    cp -n "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" "$mesh_target" || true
-    if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$mesh_target" ]]; then
-      sed -i -E "s|^mesh_configure[[:space:]]+\"[^\"]*\"[[:space:]]+\"[^\"]*\"|mesh_configure \"${DEFAULT_MESH_HOST}\" \"${DEFAULT_MESH_WORKGROUP}\"|" "$mesh_target"
-    fi
-  fi
-  if [[ -f "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" ]]; then
-    local pre_registry_target="${root_mnt}/usr/local/dserv/local/pre-registry.tcl"
-    cp -n "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" "$pre_registry_target" || true
-    if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$pre_registry_target" ]]; then
-      sed -i -E "s|^set env\\(ESS_REGISTRY_URL\\)[[:space:]]+.*|set env(ESS_REGISTRY_URL) ${DEFAULT_MESH_HOST}|" "$pre_registry_target"
-      sed -i -E "s|^set env\\(ESS_WORKGROUP\\)[[:space:]]+.*|set env(ESS_WORKGROUP)    ${DEFAULT_MESH_WORKGROUP}|" "$pre_registry_target"
-    fi
-  fi
-}
-
-install_dlsh_latest_root() {
-  local root_mnt="$1"
-  local release_json url target_dir filename version
-  target_dir="${root_mnt}/usr/local/dlsh"
-
-  release_json="$(wget -qO- https://api.github.com/repos/SheinbergLab/dlsh/releases/latest || true)"
-  if [[ -z "$release_json" ]]; then
-    die "Failed to fetch dlsh release metadata from GitHub API"
-  fi
-  if echo "$release_json" | grep -q "API rate limit exceeded"; then
-    die "GitHub API rate limit exceeded; try again later or use a cached .zip"
-  fi
-
-  url="$(
-    echo "$release_json" \
-      | grep -o '"browser_download_url":[^"]*"[^"]*\.zip"' \
-      | cut -d '"' -f 4 \
-      | grep -m 1 -E 'dlsh-.*\.zip' || true
-  )"
-
-  [[ -n "$url" ]] || die "Could not find dlsh .zip in latest release"
-
-  filename="$(basename "$url")"
-  version="$(echo "$filename" | sed -nE 's/^dlsh-([0-9]+([.][0-9]+)*)\.zip$/\1/p')"
-
-  mkdir -p "$target_dir"
-  log "Downloading dlsh archive from $url"
-  wget -O "${target_dir}/dlsh.zip" "$url"
-  if [[ -n "$version" ]]; then
-    echo "$version" > "${target_dir}/VERSION"
-  fi
+  trap - RETURN
 }
 
 install_ess_repo_root() {
@@ -2227,9 +2090,7 @@ main() {
   ensure_user_exists_root "$HB_ROOT_MNT" "$username" "$password"
 
   configure_nvme_packages_and_services "$HB_ROOT_MNT" "$locale"
-  install_stim2_latest_root "$HB_ROOT_MNT"
-  install_dserv_latest_root "$HB_ROOT_MNT"
-  install_dlsh_latest_root "$HB_ROOT_MNT"
+  install_dserv_stack_root "$HB_ROOT_MNT"
   install_ess_repo_root "$HB_ROOT_MNT" "$username"
   write_monitor_tcl_root "$HB_ROOT_MNT"
 
