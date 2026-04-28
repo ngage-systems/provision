@@ -1903,6 +1903,32 @@ screen_set DistanceToMonitor   ${MONITOR_DISTANCE_CM}
 EOF
 }
 
+configure_dserv_local_tcl_root() {
+  local root_mnt="$1"
+
+  if [[ -f "${root_mnt}/usr/local/dserv/local/post-pins.tcl.EXAMPLE" ]]; then
+    cp -n "${root_mnt}/usr/local/dserv/local/post-pins.tcl.EXAMPLE" "${root_mnt}/usr/local/dserv/local/post-pins.tcl" || true
+  fi
+  if [[ -f "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" ]]; then
+    cp -n "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" "${root_mnt}/usr/local/dserv/local/sound.tcl" || true
+  fi
+  if [[ -f "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" ]]; then
+    local mesh_target="${root_mnt}/usr/local/dserv/local/mesh.tcl"
+    cp -n "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" "$mesh_target" || true
+    if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$mesh_target" ]]; then
+      sed -i -E "s|^mesh_configure[[:space:]]+\"[^\"]*\"[[:space:]]+\"[^\"]*\"|mesh_configure \"${DEFAULT_MESH_HOST}\" \"${DEFAULT_MESH_WORKGROUP}\"|" "$mesh_target"
+    fi
+  fi
+  if [[ -f "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" ]]; then
+    local pre_registry_target="${root_mnt}/usr/local/dserv/local/pre-registry.tcl"
+    cp -n "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" "$pre_registry_target" || true
+    if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$pre_registry_target" ]]; then
+      sed -i -E "s|^set env\\(ESS_REGISTRY_URL\\)[[:space:]]+.*|set env(ESS_REGISTRY_URL) ${DEFAULT_MESH_HOST}|" "$pre_registry_target"
+      sed -i -E "s|^set env\\(ESS_WORKGROUP\\)[[:space:]]+.*|set env(ESS_WORKGROUP)    ${DEFAULT_MESH_WORKGROUP}|" "$pre_registry_target"
+    fi
+  fi
+}
+
 install_dserv_stack_root() {
   local root_mnt="$1"
   local registry_url="${DEFAULT_MESH_HOST:-https://dserv.net}"
@@ -1921,6 +1947,8 @@ install_dserv_stack_root() {
     || die "Failed to install dserv stack in NVMe rootfs."
   unmount_chroot_env "$root_mnt"
   trap - RETURN
+
+  configure_dserv_local_tcl_root "$root_mnt"
 }
 
 install_ess_repo_root() {
