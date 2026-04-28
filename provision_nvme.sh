@@ -1916,7 +1916,8 @@ configure_dserv_local_tcl_root() {
     local mesh_target="${root_mnt}/usr/local/dserv/local/mesh.tcl"
     cp -n "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" "$mesh_target" || true
     if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$mesh_target" ]]; then
-      sed -i -E "s|^mesh_configure[[:space:]]+\"[^\"]*\"[[:space:]]+\"[^\"]*\"|mesh_configure \"${DEFAULT_MESH_HOST}\" \"${DEFAULT_MESH_WORKGROUP}\"|" "$mesh_target"
+      local mesh_workgroup="${DEFAULT_MESH_WORKGROUP//./-}"
+      sed -i -E "s|^mesh_configure[[:space:]]+\"[^\"]*\"[[:space:]]+\"[^\"]*\"|mesh_configure \"${DEFAULT_MESH_HOST}\" \"${mesh_workgroup}\"|" "$mesh_target"
     fi
   fi
   if [[ -f "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" ]]; then
@@ -1955,18 +1956,22 @@ install_ess_repo_root() {
   local root_mnt="$1"
   local username="$2"
   local systems_dir="/home/${username}/systems"
+  local ess_data_dir="/usr/data/essdat"
 
-  mkdir -p "${root_mnt}${systems_dir}"
+  mkdir -p "${root_mnt}${systems_dir}" "${root_mnt}${ess_data_dir}"
   mount_chroot_env "$root_mnt"
   local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
   chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/git -C "$systems_dir" clone "$ESS_SOURCE" ess || true
   chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/git config --system --add safe.directory "${systems_dir}/ess" || true
-  # Ensure the lab user owns their home tree for normal git usage.
-  chroot "$root_mnt" "${chroot_env[@]}" /bin/chown -R "${username}:${username}" "/home/${username}" || true
+  # Ensure the lab user owns the paths it needs for normal git and ESS data usage.
+  chroot "$root_mnt" "${chroot_env[@]}" /bin/chown -R "${username}:${username}" "/home/${username}" "$ess_data_dir" || true
   unmount_chroot_env "$root_mnt"
 
   mkdir -p "${root_mnt}/usr/local/dserv/local"
-  echo "set env(ESS_SYSTEM_PATH) ${systems_dir%/}" > "${root_mnt}/usr/local/dserv/local/pre-systemdir.tcl"
+  cat > "${root_mnt}/usr/local/dserv/local/pre-systemdir.tcl" <<EOF
+set env(ESS_SYSTEM_PATH) ${systems_dir%/}
+set env(ESS_DATA_DIR)    ${ess_data_dir}
+EOF
 }
 
 configure_raspi_config_root() {
