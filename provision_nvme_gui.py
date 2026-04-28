@@ -38,6 +38,16 @@ FONT_TITLE = ("DejaVu Sans", 22, "bold")
 FONT_LABEL = ("DejaVu Sans", 14)
 FONT_INPUT = ("DejaVu Sans", 16)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
+FONT_KEYBOARD = ("DejaVu Sans", 15)
+
+KEYBOARD_FRAME_PADX = 20
+KEYBOARD_FRAME_PADY = 11
+KEYBOARD_ROW_INDENT_UNIT = 20
+KEYBOARD_KEY_PADX = 3
+KEYBOARD_KEY_PADY = 7
+KEYBOARD_ROW_PADY = 3
+KEYBOARD_CONTROLS_PADY = (5, 0)
+KEYBOARD_CONTROL_PADX = 4
 
 DEFAULT_WIFI_COUNTRY = "US"
 DEFAULT_TIMEZONE = "America/New_York"
@@ -740,7 +750,9 @@ class ProvisioningWizard(tk.Tk):
     # navigation stays pinned to the bottom of the window.
     # ------------------------------------------------------------------
     def _build_layout(self):
-        self.keyboard = tk.Frame(self, bg=ENTRY_BG, padx=18, pady=10)
+        self.keyboard = tk.Frame(
+            self, bg=ENTRY_BG, padx=KEYBOARD_FRAME_PADX, pady=KEYBOARD_FRAME_PADY
+        )
         self._build_touch_keyboard()
 
         self.nav = tk.Frame(self, bg=BG, padx=40, pady=10)
@@ -797,10 +809,10 @@ class ProvisioningWizard(tk.Tk):
             fg=FG,
             activebackground="#45475a",
             activeforeground=FG,
-            font=FONT_LABEL,
+            font=FONT_KEYBOARD,
             relief="flat",
             width=width,
-            pady=6,
+            pady=KEYBOARD_KEY_PADY,
             borderwidth=0,
             highlightthickness=0,
             takefocus=0,
@@ -817,34 +829,36 @@ class ProvisioningWizard(tk.Tk):
 
         for spec in US_ANSI_KEY_ROWS:
             row = tk.Frame(self._keyboard_rows_frame, bg=ENTRY_BG)
-            row.pack(anchor="center", pady=2)
+            row.pack(anchor="center", pady=KEYBOARD_ROW_PADY)
             if spec.get("pad", 0):
-                tk.Frame(row, width=spec["pad"] * 18, bg=ENTRY_BG).pack(side="left")
+                tk.Frame(
+                    row, width=spec["pad"] * KEYBOARD_ROW_INDENT_UNIT, bg=ENTRY_BG
+                ).pack(side="left")
             for key, shifted in spec["keys"]:
                 value = shifted if self._keyboard_shift else key
                 self._make_keyboard_button(
                     row, value, lambda insert_value=value: self._keyboard_insert(insert_value)
-                ).pack(side="left", padx=2)
+                ).pack(side="left", padx=KEYBOARD_KEY_PADX)
 
         controls = tk.Frame(self._keyboard_rows_frame, bg=ENTRY_BG)
-        controls.pack(anchor="center", pady=(4, 0))
+        controls.pack(anchor="center", pady=KEYBOARD_CONTROLS_PADY)
 
         shift_text = "Shift" if not self._keyboard_shift else "SHIFT"
         self._make_keyboard_button(
             controls, shift_text, self._keyboard_toggle_shift, width=7
-        ).pack(side="left", padx=3)
+        ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
         self._make_keyboard_button(
             controls, "Space", lambda: self._keyboard_insert(" "), width=18
-        ).pack(side="left", padx=3)
+        ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
         self._make_keyboard_button(
             controls, "Backspace", self._keyboard_backspace, width=10
-        ).pack(side="left", padx=3)
+        ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
         self._make_keyboard_button(
             controls, "Clear", self._keyboard_clear, width=7
-        ).pack(side="left", padx=3)
+        ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
         self._make_keyboard_button(
             controls, "Hide", self._hide_touch_keyboard, width=7
-        ).pack(side="left", padx=3)
+        ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
 
     def _show_touch_keyboard(self, entry):
         self._focused_entry = entry
