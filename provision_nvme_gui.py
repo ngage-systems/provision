@@ -556,7 +556,21 @@ def test_wifi_connection(ssid, password):
 
     previous_connection = active_connection_for_iface(iface)
     connection_name = safe_connection_name(ssid)
-    restore_message = ""
+    created_connection = False
+    connected_connection = False
+
+    def cleanup_test_connection():
+        if created_connection:
+            nmcli(["con", "delete", connection_name], timeout=10)
+
+    def restore_previous_connection():
+        if not previous_connection or previous_connection == connection_name:
+            return ""
+        result = nmcli(["-w", "20", "con", "up", previous_connection], timeout=25)
+        if result.returncode == 0:
+            cleanup_test_connection()
+            return f" Restored previous Wi-Fi connection '{previous_connection}'."
+        return f" Could not restore previous Wi-Fi connection '{previous_connection}'; staying on '{ssid}'."
 
     try:
         nmcli(["con", "delete", connection_name], timeout=10)
@@ -573,6 +587,7 @@ def test_wifi_connection(ssid, password):
                 "internet_reachable": False,
                 "message": f"Failed to create a temporary Wi-Fi connection for '{ssid}'.",
             }
+        created_connection = True
 
         result = nmcli(
             [
@@ -608,6 +623,7 @@ def test_wifi_connection(ssid, password):
                 "internet_reachable": False,
                 "message": f"Failed to connect to '{ssid}'. Check the password and try again.",
             }
+        connected_connection = True
 
         got_ssid = connected_wifi_ssid()
         if got_ssid != ssid:
@@ -627,7 +643,12 @@ def test_wifi_connection(ssid, password):
             }
 
         internet_ok = internet_reachable_via_iface(iface)
+        restore_message = restore_previous_connection()
         message = f"Connected to '{ssid}'."
+        if previous_connection:
+            message += restore_message
+        else:
+            message += " Leaving this Wi-Fi connected for provisioning."
         if not internet_ok:
             message += " Internet probe over Wi-Fi failed; Ethernet may still provide internet."
 
@@ -635,14 +656,13 @@ def test_wifi_connection(ssid, password):
             "ok": True,
             "tested": True,
             "internet_reachable": internet_ok,
-            "message": message + restore_message,
+            "message": message,
         }
     finally:
-        if previous_connection and previous_connection != connection_name:
-            result = nmcli(["-w", "20", "con", "up", previous_connection], timeout=25)
-            if result.returncode != 0:
-                restore_message = f" Could not restore previous connection '{previous_connection}'."
-        nmcli(["con", "delete", connection_name], timeout=10)
+        if not connected_connection:
+            if previous_connection and previous_connection != connection_name:
+                nmcli(["-w", "20", "con", "up", previous_connection], timeout=25)
+            cleanup_test_connection()
 
 
 class ProvisioningWizard(tk.Tk):
@@ -1164,7 +1184,7 @@ class ProvisioningWizard(tk.Tk):
     def _maybe_self_update(self, phase):
         if not have_internet():
             self._self_update_retry_needed = True
-            print(f"Self-update: no internet during {phase}; will retry after Wi-Fi if available.")
+            print(f"Self-update: no internet during {phase}; will retry after internet is available.")
             return
 
         dialog = self._show_busy_dialog(
@@ -1760,6 +1780,13 @@ class ProvisioningWizard(tk.Tk):
                 self.answers["wifi_continue_anyway"] = False
                 self.answers["wifi_internet_reachable"] = False
                 self._last_wifi_test_signature = None
+                if not have_internet():
+                    messagebox.showerror(
+                        "Internet required",
+                        "No Wi-Fi SSID was selected, and this device does not currently have internet. "
+                        "Connect Ethernet or go Back and enter Wi-Fi credentials before continuing.",
+                    )
+                    return False
 
         elif step_name == "_step_wifi_password":
             value = self._wifi_password_var.get()
@@ -1799,14 +1826,21 @@ class ProvisioningWizard(tk.Tk):
                     self.answers["wifi_test_message"] = result["message"]
 
                     if result["ok"]:
+                        internet_ok = have_internet()
+                        self.answers["wifi_internet_reachable"] = internet_ok
+                        if not internet_ok:
+                            messagebox.showerror(
+                                "Internet required",
+                                "The Wi-Fi credentials were accepted, but this device still does not have internet. "
+                                "Provisioning needs internet for downloads and repository updates.",
+                            )
+                            return False
                         self._last_wifi_test_signature = test_signature
                         self._show_timed_message(
                             "Success!",
-                            "Wi-Fi connected successfully!",
+                            "Internet connection verified!",
                             milliseconds=2000,
                         )
-                        if result["tested"] and not result["internet_reachable"]:
-                            messagebox.showwarning("Wi-Fi connected", result["message"])
                         if self._self_update_retry_needed:
                             self._maybe_self_update("post-wifi")
                         break

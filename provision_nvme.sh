@@ -2148,7 +2148,7 @@ main() {
   HB_SELFUPDATE_NO_INTERNET=0
   if ! update_self_if_possible "pre"; then
     if [[ "$HB_SELFUPDATE_NO_INTERNET" == "1" ]]; then
-      log "Self-update: will retry after Wi-Fi is configured."
+      log "Self-update: will retry after internet connectivity is verified."
     fi
   fi
 
@@ -2162,19 +2162,13 @@ main() {
   wifi_ssid="$ANSWER_WIFI_SSID"
   wifi_pass="$ANSWER_WIFI_PASSWORD"
 
-  if [[ -n "$wifi_ssid" ]]; then
-    log "Connecting current system to Wi-Fi SSID '$wifi_ssid' for downloads."
-    if ! connect_wifi_current "$wifi_ssid" "$wifi_pass"; then
-      die "Failed to connect to Wi-Fi SSID '$wifi_ssid'."
-    fi
-  fi
   if ! have_internet; then
-    die "No internet connectivity. Provide Wi-Fi credentials (or connect ethernet) and re-run."
+    die "No internet connectivity. The GUI should leave this system online before launching provisioning."
   fi
   log "Internet connectivity verified."
 
   if [[ "$HB_SELFUPDATE_NO_INTERNET" == "1" ]]; then
-    log "Self-update: retrying now that Wi-Fi is configured..."
+    log "Self-update: retrying now that internet connectivity is verified..."
     log "If an update is found, setup will restart so the newest provisioning script is used."
   fi
   update_self_if_possible "post" || true
