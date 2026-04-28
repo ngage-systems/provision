@@ -991,8 +991,6 @@ main() {
     die "Refusing to overwrite the current root device ($root_dev). Boot from NVMe or SD and retry."
   fi
 
-  confirm_erase_device "$fallback_dev"
-
   local defaults_group
   defaults_group="$(prompt_org_group)"
 
@@ -1001,6 +999,8 @@ main() {
 
   local rotate_choice
   rotate_choice="$(prompt_rotate_display)"
+
+  confirm_erase_device "$fallback_dev"
 
   install_packages
 
