@@ -1875,6 +1875,8 @@ write_dserv_agent_override_root() {
   local root_mnt="$1"
   [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" ]] || return 0
 
+  local registry_url="${DEFAULT_MESH_HOST%/}"
+  local workgroup="${DEFAULT_MESH_WORKGROUP}"
   local override_dir="${root_mnt}/etc/systemd/system/dserv-agent.service.d"
   local override_file="${override_dir}/override.conf"
 
@@ -1882,7 +1884,7 @@ write_dserv_agent_override_root() {
   cat > "$override_file" <<EOF
 [Service]
 ExecStart=
-ExecStart=/usr/local/bin/dserv-agent --no-tls -allow-reboot -components /usr/local/dserv/config/components.json
+ExecStart=/usr/local/bin/dserv-agent --no-tls -allow-reboot -components /usr/local/dserv/config/components.json --registry ${registry_url} --workgroup ${workgroup}
 EOF
 }
 
