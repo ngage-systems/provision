@@ -1911,7 +1911,7 @@ install_dserv_stack_root() {
 
   mount_chroot_env "$root_mnt"
   trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
-  local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive DSERV_BOOTSTRAP_FORCE=1)
+  local chroot_env=(/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive DSERV_BOOTSTRAP_FORCE=1)
   chroot "$root_mnt" "${chroot_env[@]}" /bin/bash -c \
     'curl -sSL "$1" | bash -s -- --workgroup "$2"' \
     _ "${registry_url}/setup" "$workgroup" \
