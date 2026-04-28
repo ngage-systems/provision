@@ -907,19 +907,15 @@ EOF
 Type=Application
 Name=Homebase NVMe Provisioning
 Comment=Run NVMe provisioning on boot
-Exec=bash -lc "cd /home/provision && DEVICE_DEFAULTS_GROUP=${defaults_group} python3 ./provision_nvme_gui.py"
+Exec=bash -lc "cd /home/provision/provision && DEVICE_DEFAULTS_GROUP=${defaults_group} python3 ./provision_nvme_gui.py"
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
 
-  # Put the provision repo contents directly in the provision user's home directory.
-  local repo_dir="$home_dir"
-  local clone_dir="${root_mnt}/tmp/hb_provision_clone"
-  mkdir -p "$(dirname "$clone_dir")"
-  rm -rf "$clone_dir" "${home_dir}/provision"
-  git clone --depth 1 https://github.com/ngage-systems/provision.git "$clone_dir"
-  cp -a "${clone_dir}/." "$repo_dir/"
-  rm -rf "$clone_dir"
+  # Put the provision repo in a predictable subdirectory of the provision user's home.
+  local repo_dir="${home_dir}/provision"
+  rm -rf "$repo_dir"
+  git clone https://github.com/ngage-systems/provision.git "$repo_dir"
 
   # Ensure script is executable and ownership is correct.
   chmod +x "${repo_dir}/provision_emmc_for_nvme_fallback.sh" || true

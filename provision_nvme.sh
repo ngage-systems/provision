@@ -1905,16 +1905,17 @@ install_dserv_stack_root() {
   local root_mnt="$1"
   local registry_url="${DEFAULT_MESH_HOST:-https://dserv.net}"
   local workgroup="${DEFAULT_MESH_WORKGROUP:-brown-sheinberg}"
+  local bootstrap_workgroup="${workgroup//./-}"
   registry_url="${registry_url%/}"
 
-  log "Installing dserv stack from ${registry_url}/setup for workgroup '${workgroup}'..."
+  log "Installing dserv stack from ${registry_url}/setup for workgroup '${bootstrap_workgroup}'..."
 
   mount_chroot_env "$root_mnt"
   trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
   local chroot_env=(/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive DSERV_BOOTSTRAP_FORCE=1)
   chroot "$root_mnt" "${chroot_env[@]}" /bin/bash -c \
     'curl -sSL "$1" | bash -s -- --workgroup "$2"' \
-    _ "${registry_url}/setup" "$workgroup" \
+    _ "${registry_url}/setup" "$bootstrap_workgroup" \
     || die "Failed to install dserv stack in NVMe rootfs."
   unmount_chroot_env "$root_mnt"
   trap - RETURN
