@@ -132,6 +132,50 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+apt_output_has_lock_error() {
+  local output_file="$1"
+  grep -Eiq 'Could not get lock|Unable to lock directory|Resource temporarily unavailable|Waiting for cache lock|Unable to acquire the dpkg frontend lock|Could not open lock file' "$output_file"
+}
+
+run_with_apt_lock_retry() {
+  local description="$1"
+  shift
+
+  local retry_seconds="${APT_LOCK_RETRY_SECONDS:-300}"
+  local sleep_seconds="${APT_LOCK_RETRY_SLEEP_SECONDS:-10}"
+  local start now elapsed attempt status output_file
+  start="$(date +%s)"
+  attempt=1
+  output_file="$(mktemp -p /tmp provision_apt.XXXXXX.log)"
+
+  while true; do
+    : > "$output_file"
+    if "$@" > >(tee "$output_file") 2>&1; then
+      rm -f "$output_file"
+      return 0
+    else
+      status=$?
+    fi
+
+    if ! apt_output_has_lock_error "$output_file"; then
+      rm -f "$output_file"
+      return "$status"
+    fi
+
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    if (( elapsed >= retry_seconds )); then
+      log "ERROR: ${description} failed because apt/dpkg remained locked after ${elapsed}s."
+      rm -f "$output_file"
+      return "$status"
+    fi
+
+    log "apt/dpkg lock detected during ${description}; waiting ${sleep_seconds}s before retry ${attempt}..."
+    sleep "$sleep_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
 ini_list_sections() {
   local file="$1"
   awk '
@@ -1356,8 +1400,8 @@ install_packages_host() {
   need_cmd apt-get
   log "Installing required packages on host..."
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends \
+  run_with_apt_lock_retry "host apt-get update" apt-get update
+  run_with_apt_lock_retry "host apt-get install" apt-get install -y --no-install-recommends \
     wget xz-utils openssl ca-certificates \
     util-linux coreutils gawk grep sed \
     parted \
@@ -1801,19 +1845,23 @@ configure_nvme_packages_and_services() {
     chroot "$root_mnt" "${chroot_env[@]}" "$@"
   }
 
-  if ! chroot_cmd /usr/bin/apt-get update \
-    || ! chroot_cmd /usr/bin/apt-get -y full-upgrade \
-    || ! chroot_cmd /usr/bin/apt-get -y clean; then
+  chroot_apt_get() {
+    run_with_apt_lock_retry "NVMe rootfs apt-get $*" chroot_cmd /usr/bin/apt-get "$@"
+  }
+
+  if ! chroot_apt_get update \
+    || ! chroot_apt_get -y full-upgrade \
+    || ! chroot_apt_get -y clean; then
     log "WARNING: apt full-upgrade failed in NVMe rootfs. Attempting recovery..."
     chroot_cmd /usr/bin/dpkg --configure -a || true
-    chroot_cmd /usr/bin/apt-get -y -f install || true
-    chroot_cmd /usr/bin/apt-get update \
-      && chroot_cmd /usr/bin/apt-get -y full-upgrade \
-      && chroot_cmd /usr/bin/apt-get -y clean \
+    chroot_apt_get -y -f install || true
+    chroot_apt_get update \
+      && chroot_apt_get -y full-upgrade \
+      && chroot_apt_get -y clean \
       || die "Failed to run apt update/full-upgrade in NVMe rootfs."
   fi
 
-  chroot_cmd /usr/bin/apt-get install -y \
+  chroot_apt_get install -y \
     locales build-essential cmake libevdev-dev libpq-dev libcamera-apps screen git \
     ca-certificates curl jq unzip wget cage labwc libtcl9.0 raspi-config lightdm seatd \
     || die "Failed to install packages in NVMe rootfs."
