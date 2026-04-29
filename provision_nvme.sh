@@ -1924,8 +1924,9 @@ configure_dserv_local_tcl_root() {
     local pre_registry_target="${root_mnt}/usr/local/dserv/local/pre-registry.tcl"
     cp -n "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" "$pre_registry_target" || true
     if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$pre_registry_target" ]]; then
+      local pre_registry_workgroup="${DEFAULT_MESH_WORKGROUP//./-}"
       sed -i -E "s|^set env\\(ESS_REGISTRY_URL\\)[[:space:]]+.*|set env(ESS_REGISTRY_URL) ${DEFAULT_MESH_HOST}|" "$pre_registry_target"
-      sed -i -E "s|^set env\\(ESS_WORKGROUP\\)[[:space:]]+.*|set env(ESS_WORKGROUP)    ${DEFAULT_MESH_WORKGROUP}|" "$pre_registry_target"
+      sed -i -E "s|^set env\\(ESS_WORKGROUP\\)[[:space:]]+.*|set env(ESS_WORKGROUP)    ${pre_registry_workgroup}|" "$pre_registry_target"
     fi
   fi
 }
