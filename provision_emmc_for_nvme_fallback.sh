@@ -883,6 +883,23 @@ write_fallback_config() {
     fi
   fi
 
+  # Force the Camera Module 3 overlay instead of relying on auto-detection.
+  if [[ -f "$cfg" ]]; then
+    if grep -qE '^\s*camera_auto_detect=' "$cfg"; then
+      sed -i -E 's/^\s*camera_auto_detect=.*/camera_auto_detect=0/' "$cfg"
+    else
+      echo "camera_auto_detect=0" >> "$cfg"
+    fi
+    if ! grep -qE '^\s*dtoverlay=imx708\s*$' "$cfg"; then
+      if grep -qE '^\s*\[all\]\s*$' "$cfg"; then
+        sed -i -E '/^\s*\[all\]\s*$/a dtoverlay=imx708' "$cfg"
+      else
+        echo "[all]" >> "$cfg"
+        echo "dtoverlay=imx708" >> "$cfg"
+      fi
+    fi
+  fi
+
   # Passwordless sudo for provision user.
   mkdir -p "${root_mnt}/etc/sudoers.d"
   printf '%s\n' "${username} ALL=(ALL) NOPASSWD:ALL" > "${root_mnt}/etc/sudoers.d/010-${username}-nopasswd"
