@@ -59,6 +59,9 @@ DEFAULT_MONITOR_DISTANCE_CM = "30.0"
 DEFAULT_SCREEN_ROTATION = "0"
 DEFAULT_OUTPUT = "/tmp/hb_provision_answers.json"
 WIFI_SCAN_FILE = os.environ.get("HB_WIFI_SCAN_FILE", "/tmp/hb_wifi_scan_ssids.txt")
+RESUME_STATE_VERSION = 1
+RESUME_STATE_FILE = os.environ.get("HB_PROVISION_GUI_RESUME_FILE", "/tmp/hb_provision_gui_resume.json")
+RESUME_STATE_MAX_AGE_SECONDS = 60 * 60
 ACCESSORY_CHECK_ITEMS = [
     ("touchscreen", "Touchscreen"),
     ("juicer", "Juicer"),
@@ -171,6 +174,74 @@ def read_hostname_default():
         return Path("/etc/hostname").read_text(encoding="utf-8").strip()
     except OSError:
         return socket.gethostname()
+
+
+def resume_state_path():
+    return Path(RESUME_STATE_FILE)
+
+
+def delete_resume_state(path=None):
+    path = Path(path or resume_state_path())
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"Resume state: could not delete {path}: {exc}")
+
+
+def write_resume_state(payload, path=None):
+    path = Path(path or resume_state_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    data = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            tmp_file.write(data)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def read_resume_state(path=None):
+    path = Path(path or resume_state_path())
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Resume state: ignoring unreadable state at {path}: {exc}")
+        delete_resume_state(path)
+        return None
+
+    if not isinstance(payload, dict) or payload.get("version") != RESUME_STATE_VERSION:
+        print("Resume state: ignoring unsupported state file.")
+        delete_resume_state(path)
+        return None
+
+    created_at = payload.get("created_at")
+    if not isinstance(created_at, (int, float)) or time.time() - created_at > RESUME_STATE_MAX_AGE_SECONDS:
+        print("Resume state: ignoring stale state file.")
+        delete_resume_state(path)
+        return None
+
+    if not isinstance(payload.get("answers"), dict) or not isinstance(payload.get("target_step"), str):
+        print("Resume state: ignoring malformed state file.")
+        delete_resume_state(path)
+        return None
+
+    return payload
 
 
 def quick_command(cmd, timeout=10):
@@ -686,7 +757,7 @@ class ProvisioningWizard(tk.Tk):
 
         self.output_path = output_path
         self._self_update_retry_needed = False
-        self._maybe_self_update("startup")
+        self._loaded_resume_state = False
 
         self.defaults_path = Path(os.environ.get("DEVICE_DEFAULTS_FILE", script_defaults_file()))
         self.config = load_defaults_config(self.defaults_path)
@@ -732,6 +803,8 @@ class ProvisioningWizard(tk.Tk):
             self._step_review,
         ]
         self.step_index = 0
+        self._restore_resume_state()
+        self._maybe_self_update("startup")
 
         self._build_layout()
         self._render_current_step()
@@ -745,6 +818,59 @@ class ProvisioningWizard(tk.Tk):
         height = min(800, max(420, screen_h - margin_y))
         self.geometry(f"{width}x{height}+10+10")
         self.minsize(min(760, width), min(420, height))
+
+    def _step_index_for_name(self, step_name):
+        for index, step in enumerate(self.steps):
+            if step.__name__ == step_name:
+                return index
+        return None
+
+    def _restore_resume_state(self):
+        payload = read_resume_state()
+        if not payload:
+            return
+
+        target_index = self._step_index_for_name(payload["target_step"])
+        if target_index is None:
+            print(f"Resume state: unknown target step {payload['target_step']!r}.")
+            delete_resume_state()
+            return
+
+        self.answers.update(payload["answers"])
+        self.step_index = target_index
+        self._loaded_resume_state = True
+
+        ssid = self.answers.get("wifi_ssid", "")
+        password = self.answers.get("wifi_password", "")
+        if (
+            ssid
+            and password
+            and self.answers.get("wifi_tested") is True
+            and self.answers.get("wifi_test_ssid") == ssid
+        ):
+            self._last_wifi_test_signature = (ssid, password)
+        print(f"Resume state: restored wizard at {payload['target_step']}.")
+
+    def _current_resume_target_step_name(self):
+        if not self.steps:
+            return ""
+        step_name = self.steps[self.step_index].__name__
+        if step_name == "_step_wifi_password" and self.answers.get("wifi_tested") is True:
+            return self.steps[self._next_index(self.step_index)].__name__
+        return step_name
+
+    def _save_resume_state(self):
+        target_step = self._current_resume_target_step_name()
+        if not target_step:
+            return
+        payload = {
+            "version": RESUME_STATE_VERSION,
+            "created_at": time.time(),
+            "target_step": target_step,
+            "answers": self.answers,
+        }
+        write_resume_state(payload)
+        print(f"Resume state: saved wizard state for {target_step}.")
 
     # ------------------------------------------------------------------
     # Layout: content expands, the touch keyboard appears above nav, and
@@ -1400,12 +1526,22 @@ class ProvisioningWizard(tk.Tk):
         self._self_update_retry_needed = False
         print(f"Self-update: {result['message']}")
         if result["updated"]:
+            try:
+                self._save_resume_state()
+            except (OSError, TypeError) as exc:
+                print(f"Resume state: could not save before restart: {exc}")
+                messagebox.showwarning(
+                    "Resume save failed",
+                    "The provisioning GUI was updated, but it could not save the current answers "
+                    f"before restarting.\n\n{exc}",
+                )
             self._show_timed_message(
                 "Update installed",
                 "The provisioning GUI was updated. Restarting now so the newest defaults are used.",
                 milliseconds=3000,
             )
             os.execv(sys.executable, [sys.executable, *sys.argv])
+        delete_resume_state()
 
     def _show_default_hint(self, key):
         value = self.answers.get(key, "")
