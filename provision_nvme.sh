@@ -2006,20 +2006,22 @@ install_ess_repo_root() {
   local username="$2"
   local systems_dir="/home/${username}/systems"
   local ess_data_dir="/usr/data/essdat"
+  local ess_converted_dir="/usr/data/converted"
 
-  mkdir -p "${root_mnt}${systems_dir}" "${root_mnt}${ess_data_dir}"
+  mkdir -p "${root_mnt}${systems_dir}" "${root_mnt}${ess_data_dir}" "${root_mnt}${ess_converted_dir}"
   mount_chroot_env "$root_mnt"
   local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
   chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/git -C "$systems_dir" clone "$ESS_SOURCE" ess || true
   chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/git config --system --add safe.directory "${systems_dir}/ess" || true
   # Ensure the lab user owns the paths it needs for normal git and ESS data usage.
-  chroot "$root_mnt" "${chroot_env[@]}" /bin/chown -R "${username}:${username}" "/home/${username}" "$ess_data_dir" || true
+  chroot "$root_mnt" "${chroot_env[@]}" /bin/chown -R "${username}:${username}" "/home/${username}" "$ess_data_dir" "$ess_converted_dir" || true
   unmount_chroot_env "$root_mnt"
 
   mkdir -p "${root_mnt}/usr/local/dserv/local"
   cat > "${root_mnt}/usr/local/dserv/local/pre-systemdir.tcl" <<EOF
 set env(ESS_SYSTEM_PATH) ${systems_dir%/}
 set env(ESS_DATA_DIR)    ${ess_data_dir}
+set env(ESS_EXPORT_PATH) ${ess_converted_dir}
 EOF
 }
 
