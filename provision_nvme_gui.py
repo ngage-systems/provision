@@ -12,12 +12,13 @@ import configparser
 import json
 import os
 from pathlib import Path
+import queue
 import re
-import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 from tkinter import messagebox
@@ -994,15 +995,59 @@ class ProvisioningWizard(tk.Tk):
         print(json.dumps(self.answers, indent=2, sort_keys=True))
         if not self._launch_backend():
             return
-        self.destroy()
+        self.withdraw()
 
     def _confirm_destructive_provision(self):
-        proceed = messagebox.askyesno(
-            "Erase NVMe and provision?",
-            "Provisioning will erase the selected NVMe disk and reboot this device when complete.\n\n"
-            "Start provisioning now?",
-        )
-        if not proceed:
+        dialog = tk.Toplevel(self)
+        dialog.title("Erase NVMe and provision?")
+        dialog.configure(bg=BG)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        result = tk.BooleanVar(value=False)
+
+        def choose(value):
+            result.set(value)
+            dialog.destroy()
+
+        tk.Label(
+            dialog,
+            text="Erase NVMe and provision?",
+            bg=BG,
+            fg=FG,
+            font=FONT_TITLE,
+        ).pack(anchor="w", padx=40, pady=(30, 15))
+        tk.Label(
+            dialog,
+            text=(
+                "Provisioning will erase the selected NVMe disk and reboot this device "
+                "when complete.\n\nStart provisioning now?"
+            ),
+            bg=BG,
+            fg=FG,
+            font=FONT_LABEL,
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", padx=40, pady=(0, 30))
+
+        buttons = tk.Frame(dialog, bg=BG)
+        buttons.pack(fill="x", padx=40, pady=(0, 35))
+        no_button = self._make_button(buttons, "No", lambda: choose(False))
+        no_button.config(padx=60, pady=24, width=8)
+        no_button.pack(side="left")
+        yes_button = self._make_button(buttons, "Yes", lambda: choose(True), primary=True)
+        yes_button.config(padx=60, pady=24, width=8)
+        yes_button.pack(side="right")
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        yes_button.focus_set()
+        dialog.wait_window()
+
+        if not result.get():
             return False
 
         self.answers["confirm_erase"] = "ERASE"
@@ -1016,41 +1061,163 @@ class ProvisioningWizard(tk.Tk):
 
         provision_wrapper = Path("/usr/local/sbin/hb-provision-nvme")
         if provision_wrapper.is_file():
-            backend_command = f"sudo -n {shlex.quote(str(provision_wrapper))}"
             backend_args = ["sudo", "-n", str(provision_wrapper)]
         else:
-            backend_command = (
-                f"cd {shlex.quote(str(backend.parent))} && "
-                f"sudo bash {shlex.quote(str(backend))} --answers {shlex.quote(str(self.output_path))}"
-            )
             backend_args = ["sudo", "bash", str(backend), "--answers", str(self.output_path)]
 
-        launched_in_terminal = False
-        terminal = shutil.which("x-terminal-emulator")
-        if terminal:
-            command = (
-                f"{backend_command}; "
-                "status=$?; echo; "
-                "echo \"Provisioning exited with status ${status}.\"; "
-                "sleep 30; exit ${status}"
-            )
-            args = [terminal, "-e", "bash", "-lc", command]
-            launched_in_terminal = True
-        else:
-            args = backend_args
+        dialog, status_label, log_text, close_button = self._show_provision_log_window()
+        output_queue = queue.Queue()
 
         try:
-            subprocess.Popen(args)
+            process = subprocess.Popen(
+                backend_args,
+                cwd=str(backend.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
         except OSError as exc:
+            dialog.destroy()
             messagebox.showerror("Launch failed", f"Could not start provisioning backend:\n{exc}")
             return False
 
-        messagebox.showinfo(
-            "Provisioning started",
-            "The NVMe provisioning backend is running"
-            + (" in a terminal window." if launched_in_terminal else "."),
+        self._append_provision_log(
+            log_text,
+            "Starting NVMe provisioning backend...\n"
+            f"$ {' '.join(backend_args)}\n\n",
         )
+
+        def read_output():
+            try:
+                if process.stdout is not None:
+                    for line in process.stdout:
+                        output_queue.put(("line", line))
+            except OSError as exc:
+                output_queue.put(("line", f"\nError reading provisioning output: {exc}\n"))
+            output_queue.put(("done", process.wait()))
+
+        def close_after_exit():
+            if dialog.winfo_exists():
+                dialog.destroy()
+            self.destroy()
+
+        def ignore_close_while_running():
+            status_label.config(
+                text="Provisioning is still running. This window will close after reboot or when the backend exits."
+            )
+
+        def poll_output():
+            finished = False
+            exit_status = None
+            while True:
+                try:
+                    kind, payload = output_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+                if kind == "line":
+                    self._append_provision_log(log_text, payload)
+                elif kind == "done":
+                    finished = True
+                    exit_status = payload
+
+            if finished:
+                self._append_provision_log(
+                    log_text,
+                    f"\nProvisioning exited with status {exit_status}.\n",
+                )
+                status_label.config(
+                    text=f"Provisioning exited with status {exit_status}. Review the log before closing."
+                )
+                close_button.config(state="normal")
+                dialog.protocol("WM_DELETE_WINDOW", close_after_exit)
+                try:
+                    dialog.grab_release()
+                except tk.TclError:
+                    pass
+                return
+
+            if dialog.winfo_exists():
+                self.after(100, poll_output)
+
+        dialog.protocol("WM_DELETE_WINDOW", ignore_close_while_running)
+        threading.Thread(target=read_output, daemon=True).start()
+        self.after(100, poll_output)
         return True
+
+    def _show_provision_log_window(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("NVMe provisioning log")
+        dialog.configure(bg=BG)
+        dialog.geometry("1120x720+80+50")
+        dialog.minsize(800, 500)
+        dialog.grab_set()
+
+        tk.Label(
+            dialog,
+            text="Provisioning NVMe",
+            bg=BG,
+            fg=FG,
+            font=FONT_TITLE,
+        ).pack(anchor="w", padx=30, pady=(25, 8))
+
+        status_label = tk.Label(
+            dialog,
+            text="Provisioning is running. This device will reboot automatically when complete.",
+            bg=BG,
+            fg=MUTED,
+            font=FONT_LABEL,
+            justify="left",
+            wraplength=1040,
+        )
+        status_label.pack(anchor="w", fill="x", padx=30, pady=(0, 16))
+
+        log_frame = tk.Frame(dialog, bg=ENTRY_BG, padx=2, pady=2)
+        log_frame.pack(fill="both", expand=True, padx=30, pady=(0, 18))
+
+        log_text = tk.Text(
+            log_frame,
+            bg="#11111b",
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("DejaVu Sans Mono", 11),
+            wrap="word",
+            padx=12,
+            pady=10,
+            state="disabled",
+            takefocus=0,
+            cursor="arrow",
+        )
+        log_text.pack(side="left", fill="both", expand=True)
+        log_text.bind("<FocusIn>", lambda _event: dialog.focus_set(), add="+")
+        log_text.bind("<Button-1>", lambda _event: "break", add="+")
+
+        scrollbar = tk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
+        scrollbar.pack(side="right", fill="y")
+        log_text.config(yscrollcommand=scrollbar.set)
+
+        footer = tk.Frame(dialog, bg=BG)
+        footer.pack(fill="x", padx=30, pady=(0, 25))
+        close_button = self._make_button(footer, "Close", lambda: self.destroy())
+        close_button.config(state="disabled")
+        close_button.pack(side="right")
+
+        dialog.update_idletasks()
+        dialog.focus_set()
+        return dialog, status_label, log_text, close_button
+
+    def _append_provision_log(self, log_text, text):
+        if not log_text.winfo_exists():
+            return
+        log_text.config(state="normal")
+        log_text.insert("end", text)
+        log_text.see("end")
+        log_text.config(state="disabled")
 
     # ------------------------------------------------------------------
     # Helpers for building consistent step UIs
