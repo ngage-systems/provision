@@ -1302,6 +1302,9 @@ class ProvisioningWizard(tk.Tk):
         mesh_workgroup = self._selected_mesh_workgroup()
         if mesh_workgroup:
             message += f" Visit dserv.net/w/{mesh_workgroup} after reboot."
+            hostname = self.answers.get("hostname", "").strip()
+            if hostname:
+                message += f" and select {hostname} when it appears."
         return message
 
     def _show_provision_log_window(self):
