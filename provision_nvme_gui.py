@@ -1273,6 +1273,37 @@ class ProvisioningWizard(tk.Tk):
         self.after(100, poll_output)
         return True
 
+    def _selected_mesh_workgroup(self):
+        candidates = []
+        section = self.answers.get("defaults_section", "").strip()
+        group = self.answers.get("defaults_group", "").strip()
+
+        if section:
+            candidates.append(section)
+            if "." in section:
+                candidates.append(section.rsplit(".", 1)[0])
+        if group:
+            candidates.append(group)
+
+        for candidate in dict.fromkeys(candidates):
+            if not self.config.has_section(candidate):
+                continue
+            mesh_workgroup = self.config.get(candidate, "mesh_workgroup", fallback="").strip()
+            if mesh_workgroup:
+                return mesh_workgroup.replace(".", "-")
+
+        return group.replace(".", "-") if group else ""
+
+    def _provision_running_message(self):
+        message = (
+            "Provisioning new system. This will take about 5-10 mins and device will reboot "
+            "automatically when complete."
+        )
+        mesh_workgroup = self._selected_mesh_workgroup()
+        if mesh_workgroup:
+            message += f" Visit dserv.net/w/{mesh_workgroup} after reboot."
+        return message
+
     def _show_provision_log_window(self):
         dialog = tk.Toplevel(self)
         dialog.title("NVMe provisioning log")
@@ -1291,7 +1322,7 @@ class ProvisioningWizard(tk.Tk):
 
         status_label = tk.Label(
             dialog,
-            text="Provisioning is running. This device will reboot automatically when complete.",
+            text=self._provision_running_message(),
             bg=BG,
             fg=MUTED,
             font=FONT_LABEL,
