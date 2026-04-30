@@ -900,10 +900,21 @@ write_fallback_config() {
     fi
   fi
 
-  # Passwordless sudo for provision user.
+  # Passwordless sudo only for the NVMe provisioning backend.
+  local provision_wrapper="/usr/local/sbin/hb-provision-nvme"
+  install -d -m 0755 "${root_mnt}/usr/local/sbin"
+  cat > "${root_mnt}${provision_wrapper}" <<'EOF'
+#!/usr/bin/env bash
+exec /bin/bash /home/provision/provision/provision_nvme.sh --answers /tmp/hb_provision_answers.json
+EOF
+  chown root:root "${root_mnt}${provision_wrapper}"
+  chmod 0755 "${root_mnt}${provision_wrapper}"
+
   mkdir -p "${root_mnt}/etc/sudoers.d"
-  printf '%s\n' "${username} ALL=(ALL) NOPASSWD:ALL" > "${root_mnt}/etc/sudoers.d/010-${username}-nopasswd"
-  chmod 0440 "${root_mnt}/etc/sudoers.d/010-${username}-nopasswd"
+  rm -f "${root_mnt}/etc/sudoers.d/010-${username}-nopasswd"
+  printf '%s\n' "${username} ALL=(root) NOPASSWD: ${provision_wrapper}" > "${root_mnt}/etc/sudoers.d/010-${username}-provision-nvme"
+  chown root:root "${root_mnt}/etc/sudoers.d/010-${username}-provision-nvme"
+  chmod 0440 "${root_mnt}/etc/sudoers.d/010-${username}-provision-nvme"
 
   # Auto-login to desktop (best-effort; depends on display manager).
   if [[ -d "${root_mnt}/etc/lightdm" ]]; then

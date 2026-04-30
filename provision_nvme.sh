@@ -1924,7 +1924,7 @@ write_dserv_agent_override_root() {
   [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" ]] || return 0
 
   local registry_url="${DEFAULT_MESH_HOST%/}"
-  local workgroup="${DEFAULT_MESH_WORKGROUP}"
+  local workgroup="${DEFAULT_MESH_WORKGROUP//./-}"
   local override_dir="${root_mnt}/etc/systemd/system/dserv-agent.service.d"
   local override_file="${override_dir}/override.conf"
 

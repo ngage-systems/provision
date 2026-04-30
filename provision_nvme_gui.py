@@ -1014,20 +1014,30 @@ class ProvisioningWizard(tk.Tk):
             messagebox.showerror("Backend missing", f"Could not find provisioning backend:\n{backend}")
             return False
 
+        provision_wrapper = Path("/usr/local/sbin/hb-provision-nvme")
+        if provision_wrapper.is_file():
+            backend_command = f"sudo -n {shlex.quote(str(provision_wrapper))}"
+            backend_args = ["sudo", "-n", str(provision_wrapper)]
+        else:
+            backend_command = (
+                f"cd {shlex.quote(str(backend.parent))} && "
+                f"sudo bash {shlex.quote(str(backend))} --answers {shlex.quote(str(self.output_path))}"
+            )
+            backend_args = ["sudo", "bash", str(backend), "--answers", str(self.output_path)]
+
         launched_in_terminal = False
         terminal = shutil.which("x-terminal-emulator")
         if terminal:
             command = (
-                f"cd {shlex.quote(str(backend.parent))} && "
-                f"sudo bash {shlex.quote(str(backend))} --answers {shlex.quote(str(self.output_path))}; "
+                f"{backend_command}; "
                 "status=$?; echo; "
-                "echo \"Provisioning exited with status ${status}. Press Enter to close.\"; "
-                "read -r _; exit ${status}"
+                "echo \"Provisioning exited with status ${status}.\"; "
+                "sleep 30; exit ${status}"
             )
             args = [terminal, "-e", "bash", "-lc", command]
             launched_in_terminal = True
         else:
-            args = ["sudo", "bash", str(backend), "--answers", str(self.output_path)]
+            args = backend_args
 
         try:
             subprocess.Popen(args)
