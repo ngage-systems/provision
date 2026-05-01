@@ -1148,6 +1148,20 @@ class ProvisioningWizard(tk.Tk):
         else:
             dialog.focus_force()
 
+    def _fit_modal_to_screen(self, dialog, max_width=900, min_height=200):
+        """Size and center a modal so all packed content fits (avoids clipping buttons on small displays)."""
+        dialog.update_idletasks()
+        sw = max(1, dialog.winfo_screenwidth())
+        sh = max(1, dialog.winfo_screenheight())
+        margin = 16
+        req_w = dialog.winfo_reqwidth()
+        req_h = dialog.winfo_reqheight()
+        w = min(max(req_w + 8, 400), min(max_width, sw - 2 * margin))
+        h = min(max(req_h + 8, min_height), sh - 2 * margin)
+        x = max(margin, (sw - w) // 2)
+        y = max(margin, (sh - h) // 2)
+        dialog.geometry(f"{w}x{h}+{x}+{y}")
+
     def _build_touch_keyboard(self):
         self._keyboard_rows_frame = tk.Frame(self.keyboard, bg=ENTRY_BG)
         self._keyboard_rows_frame.pack(anchor="center", fill="x")
@@ -1807,6 +1821,10 @@ class ProvisioningWizard(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("Wi-Fi test failed")
         dialog.configure(bg=BG)
+        dialog.minsize(400, 220)
+
+        sw = max(480, self.winfo_screenwidth())
+        wrap_px = max(280, min(760, sw - 80))
 
         tk.Label(
             dialog,
@@ -1814,37 +1832,60 @@ class ProvisioningWizard(tk.Tk):
             bg=BG,
             fg=ERROR,
             font=FONT_TITLE,
-        ).pack(anchor="w", padx=30, pady=(25, 10))
-        tk.Label(
-            dialog,
-            text=(
-                "We could not connect to this Wi-Fi network from the current location. "
-                "The password may be wrong, or this device may be using Wi-Fi settings "
-                "for another site.\n\n"
-                f"{message}\n\n"
-                "If you continue anyway, the password you entered will be written to the "
-                "device as-is. If it is wrong, the device will not connect to Wi-Fi after restarting."
-            ),
-            bg=BG,
-            fg=FG,
-            font=FONT_LABEL,
-            justify="left",
-            wraplength=760,
-        ).pack(anchor="w", padx=30, pady=(0, 20))
+        ).pack(anchor="w", padx=30, pady=(18, 8))
 
         action = tk.StringVar(value="")
         buttons = tk.Frame(dialog, bg=BG)
-        buttons.pack(fill="x", padx=30, pady=(0, 25))
+        buttons.pack(side="bottom", fill="x", padx=30, pady=(0, 20))
         retry_button = self._make_button(buttons, "Try Again", lambda: action.set("retry"), primary=True)
         retry_button.pack(side="left")
         self._make_button(buttons, "Edit Wi-Fi", lambda: action.set("edit")).pack(side="left", padx=15)
         self._make_button(buttons, "Continue Anyway", lambda: action.set("continue")).pack(side="right")
 
+        body = (
+            "We could not connect to this Wi-Fi network from the current location. "
+            "The password may be wrong, or this device may be using Wi-Fi settings "
+            "for another site.\n\n"
+            f"{message}\n\n"
+            "If you continue anyway, the password you entered will be written to the "
+            "device as-is. If it is wrong, the device will not connect to Wi-Fi after restarting."
+        )
+
+        msg_frame = tk.Frame(dialog, bg=BG)
+        msg_frame.pack(side="top", fill="both", expand=True, padx=30, pady=(0, 8))
+
+        sh = max(360, self.winfo_screenheight())
+        text_lines = max(5, min(16, (sh - 320) // 22))
+
+        msg_widget = tk.Text(
+            msg_frame,
+            wrap="word",
+            font=FONT_LABEL,
+            bg=ENTRY_BG,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+            highlightthickness=0,
+            padx=12,
+            pady=12,
+            height=text_lines,
+            width=max(36, wrap_px // 11),
+            state="normal",
+        )
+        msg_widget.insert("1.0", body)
+        msg_widget.configure(state="disabled")
+
+        scroll = tk.Scrollbar(msg_frame, command=msg_widget.yview, bg=ENTRY_BG, troughcolor=BG)
+        msg_widget.configure(yscrollcommand=scroll.set)
+        msg_widget.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        self._fit_modal_to_screen(dialog, max_width=min(900, sw))
         self._finalize_modal(
             dialog,
             focus_widget=retry_button,
             parent=self,
-            geometry="820x300+230+180",
+            geometry=None,
         )
         dialog.wait_variable(action)
         choice = action.get()
@@ -1856,6 +1897,10 @@ class ProvisioningWizard(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("Re-enter Wi-Fi password")
         dialog.configure(bg=BG)
+        dialog.minsize(400, 200)
+
+        sw = max(480, self.winfo_screenwidth())
+        wrap_px = max(280, min(760, sw - 80))
 
         tk.Label(
             dialog,
@@ -1863,7 +1908,7 @@ class ProvisioningWizard(tk.Tk):
             bg=BG,
             fg=ERROR,
             font=FONT_TITLE,
-        ).pack(anchor="w", padx=30, pady=(25, 10))
+        ).pack(anchor="w", padx=30, pady=(18, 8))
         tk.Label(
             dialog,
             text=(
@@ -1875,21 +1920,22 @@ class ProvisioningWizard(tk.Tk):
             fg=FG,
             font=FONT_LABEL,
             justify="left",
-            wraplength=760,
-        ).pack(anchor="w", padx=30, pady=(0, 20))
+            wraplength=wrap_px,
+        ).pack(anchor="w", padx=30, pady=(0, 12))
 
         action = tk.StringVar(value="")
         buttons = tk.Frame(dialog, bg=BG)
-        buttons.pack(fill="x", padx=30, pady=(0, 25))
+        buttons.pack(side="bottom", fill="x", padx=30, pady=(0, 20))
         retry_button = self._make_button(buttons, "Re-enter Password", lambda: action.set("retry"), primary=True)
         retry_button.pack(side="left")
         self._make_button(buttons, "Edit Wi-Fi", lambda: action.set("edit")).pack(side="left", padx=15)
 
+        self._fit_modal_to_screen(dialog, max_width=min(900, sw))
         self._finalize_modal(
             dialog,
             focus_widget=retry_button,
             parent=self,
-            geometry="820x260+230+200",
+            geometry=None,
         )
         dialog.wait_variable(action)
         choice = action.get()
