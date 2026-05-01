@@ -37,6 +37,7 @@ MUTED = "#a6adc8"
 
 FONT_TITLE = ("DejaVu Sans", 22, "bold")
 FONT_LABEL = ("DejaVu Sans", 14)
+FONT_REVIEW = ("DejaVu Sans", 12)
 FONT_INPUT = ("DejaVu Sans", 16)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
 FONT_KEYBOARD = ("DejaVu Sans", 15)
@@ -1125,7 +1126,7 @@ class ProvisioningWizard(tk.Tk):
 
     def _confirm_destructive_provision(self):
         dialog = tk.Toplevel(self)
-        dialog.title("Erase NVMe and provision?")
+        dialog.title("Install new system?")
         dialog.configure(bg=BG)
         dialog.transient(self)
         dialog.grab_set()
@@ -1138,7 +1139,7 @@ class ProvisioningWizard(tk.Tk):
 
         tk.Label(
             dialog,
-            text="Erase NVMe and provision?",
+            text="Install new system?",
             bg=BG,
             fg=FG,
             font=FONT_TITLE,
@@ -1146,8 +1147,11 @@ class ProvisioningWizard(tk.Tk):
         tk.Label(
             dialog,
             text=(
-                "Provisioning will erase the selected NVMe disk and reboot this device "
-                "when complete.\n\nStart provisioning now?"
+                "This will erase the device's internal storage drive and install a fresh system on it. "
+                "That erase step is expected: it clears the target drive so the new setup can be written.\n\n"
+                "If this is a new system, there is probably nothing on that drive to lose. "
+                "If the drive already has data you care about, stop now because that data will be lost.\n\n"
+                "Start provisioning now?"
             ),
             bg=BG,
             fg=FG,
@@ -1250,6 +1254,19 @@ class ProvisioningWizard(tk.Tk):
                     exit_status = payload
 
             if finished:
+                if exit_status == 0:
+                    self._append_provision_log(log_text, "\nProvisioning complete.\n")
+                    status_label.config(
+                        text="Provisioning complete. Read the final instructions and click Reboot when ready."
+                    )
+                    close_button.config(state="disabled")
+                    try:
+                        dialog.grab_release()
+                    except tk.TclError:
+                        pass
+                    self._show_provision_complete_dialog(dialog)
+                    return
+
                 self._append_provision_log(
                     log_text,
                     f"\nProvisioning exited with status {exit_status}.\n",
@@ -1296,8 +1313,8 @@ class ProvisioningWizard(tk.Tk):
 
     def _provision_running_message(self):
         message = (
-            "Provisioning new system. This will take about 5-10 mins and device will reboot "
-            "automatically when complete."
+            "Provisioning new system. This will take about 5-10 mins. "
+            "When it is complete, you will be asked to reboot this device."
         )
         mesh_workgroup = self._selected_mesh_workgroup()
         if mesh_workgroup:
@@ -1306,6 +1323,87 @@ class ProvisioningWizard(tk.Tk):
             if hostname:
                 message += f" and select {hostname} when it appears."
         return message
+
+    def _provision_complete_web_message(self):
+        mesh_workgroup = self._selected_mesh_workgroup()
+        if mesh_workgroup:
+            return f"From a separate computer on the same network, visit dserv.net/w/{mesh_workgroup}."
+        return "From a separate computer on the same network, visit the dserv webpage for this system."
+
+    def _provision_complete_device_message(self):
+        hostname = self.answers.get("hostname", "").strip()
+        if hostname:
+            return f"After reboot, the newly provisioned device '{hostname}' should appear on that page soon."
+        return "After reboot, the newly provisioned device should appear on that page soon."
+
+    def _show_provision_complete_dialog(self, parent):
+        dialog = tk.Toplevel(self)
+        dialog.title("Provisioning complete")
+        dialog.configure(bg=BG)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.geometry("860x430+210+120")
+
+        tk.Label(
+            dialog,
+            text="Provisioning complete",
+            bg=BG,
+            fg=SUCCESS,
+            font=FONT_TITLE,
+        ).pack(anchor="w", padx=35, pady=(30, 12))
+
+        message = (
+            "The new system has been installed on the device's internal drive.\n\n"
+            f"{self._provision_complete_web_message()}\n\n"
+            "Click Reboot to finish setup and start from the newly installed system. "
+            f"{self._provision_complete_device_message()}\n\n"
+            "When the device finishes rebooting, its local screen may stay black. "
+            "That is expected for this setup."
+        )
+        tk.Label(
+            dialog,
+            text=message,
+            bg=BG,
+            fg=FG,
+            font=FONT_LABEL,
+            justify="left",
+            wraplength=780,
+        ).pack(anchor="w", fill="x", padx=35, pady=(0, 25))
+
+        footer = tk.Frame(dialog, bg=BG)
+        footer.pack(fill="x", padx=35, pady=(0, 30))
+        reboot_button = self._make_button(
+            footer,
+            "Reboot",
+            lambda: self._request_reboot_from_completion(dialog, reboot_button),
+            primary=True,
+        )
+        reboot_button.config(padx=60, pady=24)
+        reboot_button.pack(side="right")
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        dialog.update_idletasks()
+        reboot_button.focus_set()
+
+    def _request_reboot_from_completion(self, dialog, reboot_button):
+        reboot_button.config(state="disabled", text="Rebooting...")
+        dialog.update_idletasks()
+        result = run_command(["sudo", "-n", "reboot"], timeout=10)
+        if result.returncode == 0:
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+            self.destroy()
+            return
+
+        reboot_button.config(state="normal", text="Reboot")
+        messagebox.showerror(
+            "Reboot failed",
+            "Could not reboot automatically.\n\n"
+            f"{result.stderr.strip() or result.stdout.strip() or 'sudo reboot failed.'}",
+        )
 
     def _show_provision_log_window(self):
         dialog = tk.Toplevel(self)
@@ -1978,7 +2076,7 @@ class ProvisioningWizard(tk.Tk):
                 text=f"{label}:",
                 bg=ENTRY_BG,
                 fg=FG,
-                font=FONT_LABEL,
+                font=FONT_REVIEW,
                 width=22,
                 anchor="w",
             ).pack(side="left")
@@ -1987,7 +2085,7 @@ class ProvisioningWizard(tk.Tk):
                 text=str(value),
                 bg=ENTRY_BG,
                 fg=ACCENT,
-                font=FONT_LABEL,
+                font=FONT_REVIEW,
                 anchor="w",
             ).pack(side="left", fill="x", expand=True)
 

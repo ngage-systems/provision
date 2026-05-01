@@ -748,14 +748,63 @@ check_bookworm_or_later() {
   esac
 }
 
+internet_probe_targets() {
+  # Keep this in sync with provision_nvme_gui.py::have_internet.
+  printf '%s\n' \
+    "1.1.1.1:443" \
+    "1.0.0.1:443" \
+    "93.184.216.34:80"
+}
+
+internet_probe_targets_text() {
+  local joined=""
+  local target
+  while IFS= read -r target; do
+    if [[ -n "$joined" ]]; then
+      joined+=", "
+    fi
+    joined+="$target"
+  done < <(internet_probe_targets)
+  printf '%s\n' "$joined"
+}
+
+probe_tcp_target() {
+  local target="$1"
+  local host="${target%:*}"
+  local port="${target##*:}"
+
+  [[ -n "$host" && -n "$port" && "$host" != "$port" ]] || return 1
+
+  if have_cmd timeout; then
+    timeout 3 bash -c 'cat < /dev/null > /dev/tcp/$1/$2' _ "$host" "$port" >/dev/null 2>&1
+  else
+    bash -c 'cat < /dev/null > /dev/tcp/$1/$2' _ "$host" "$port" >/dev/null 2>&1
+  fi
+}
+
 have_internet() {
   # Best-effort connectivity check without requiring curl/ping.
-  if have_cmd timeout; then
-    timeout 3 bash -c 'cat < /dev/null > /dev/tcp/1.1.1.1/443' >/dev/null 2>&1 && return 0
-  else
-    bash -c 'cat < /dev/null > /dev/tcp/1.1.1.1/443' >/dev/null 2>&1 && return 0
-  fi
+  local target
+  while IFS= read -r target; do
+    probe_tcp_target "$target" && return 0
+  done < <(internet_probe_targets)
   return 1
+}
+
+wait_for_internet() {
+  local timeout_s="${1:-30}"
+  local sleep_s="${2:-3}"
+  local waited=0
+
+  while true; do
+    have_internet && return 0
+    if (( waited >= timeout_s )); then
+      return 1
+    fi
+    log "Internet probe failed for $(internet_probe_targets_text); retrying in ${sleep_s}s..."
+    sleep "$sleep_s"
+    waited=$((waited + sleep_s))
+  done
 }
 
 update_self_if_possible() {
@@ -780,7 +829,7 @@ update_self_if_possible() {
   fi
   if ! have_internet; then
     HB_SELFUPDATE_NO_INTERNET=1
-    log "Self-update: no internet; skipping ${phase} update."
+    log "Self-update: no internet after checking $(internet_probe_targets_text); skipping ${phase} update."
     return 1
   fi
   if ! have_cmd git; then
@@ -2112,8 +2161,8 @@ main() {
   wifi_ssid="$ANSWER_WIFI_SSID"
   wifi_pass="$ANSWER_WIFI_PASSWORD"
 
-  if ! have_internet; then
-    die "No internet connectivity. The GUI should leave this system online before launching provisioning."
+  if ! wait_for_internet 30 3; then
+    die "No internet connectivity after checking $(internet_probe_targets_text). Wi-Fi may be connected but blocked by a captive portal, firewall, or a route/DNS issue."
   fi
   log "Internet connectivity verified."
 
@@ -2196,9 +2245,7 @@ main() {
 
   set_eeprom_boot_to_nvme
 
-  log "Provisioning complete. Rebooting in 5 seconds..."
-  sleep 5
-  reboot
+  log "Provisioning complete. Reboot from the GUI when ready to start the newly installed system."
 }
 
 main "$@"
