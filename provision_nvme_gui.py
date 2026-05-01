@@ -60,6 +60,8 @@ DEFAULT_MONITOR_DISTANCE_CM = "30.0"
 DEFAULT_SCREEN_ROTATION = "0"
 DEFAULT_OUTPUT = "/tmp/hb_provision_answers.json"
 WIFI_SCAN_FILE = os.environ.get("HB_WIFI_SCAN_FILE", "/tmp/hb_wifi_scan_ssids.txt")
+REBOOT_REQUEST_FILE = os.environ.get("HB_PROVISION_REBOOT_REQUEST_FILE", "/tmp/hb_provision_reboot_requested")
+PROVISION_COMPLETE_MARKER = "Provisioning complete. Waiting for GUI reboot request."
 RESUME_STATE_VERSION = 1
 RESUME_STATE_FILE = os.environ.get("HB_PROVISION_GUI_RESUME_FILE", "/tmp/hb_provision_gui_resume.json")
 RESUME_STATE_MAX_AGE_SECONDS = 60 * 60
@@ -1197,6 +1199,7 @@ class ProvisioningWizard(tk.Tk):
 
         dialog, status_label, log_text, close_button = self._show_provision_log_window()
         output_queue = queue.Queue()
+        completion_shown = False
 
         try:
             process = subprocess.Popen(
@@ -1239,6 +1242,7 @@ class ProvisioningWizard(tk.Tk):
             )
 
         def poll_output():
+            nonlocal completion_shown
             finished = False
             exit_status = None
             while True:
@@ -1249,11 +1253,25 @@ class ProvisioningWizard(tk.Tk):
 
                 if kind == "line":
                     self._append_provision_log(log_text, payload)
+                    if not completion_shown and PROVISION_COMPLETE_MARKER in payload:
+                        completion_shown = True
+                        status_label.config(
+                            text="Provisioning complete. Read the final instructions and click Reboot when ready."
+                        )
+                        close_button.config(state="disabled")
+                        try:
+                            dialog.grab_release()
+                        except tk.TclError:
+                            pass
+                        self._show_provision_complete_dialog(dialog)
                 elif kind == "done":
                     finished = True
                     exit_status = payload
 
             if finished:
+                if completion_shown and exit_status == 0:
+                    return
+
                 if exit_status == 0:
                     self._append_provision_log(log_text, "\nProvisioning complete.\n")
                     status_label.config(
@@ -1318,7 +1336,7 @@ class ProvisioningWizard(tk.Tk):
         )
         mesh_workgroup = self._selected_mesh_workgroup()
         if mesh_workgroup:
-            message += f" Visit dserv.net/w/{mesh_workgroup} after reboot."
+            message += f" Visit dserv.net/w/{mesh_workgroup} after reboot "
             hostname = self.answers.get("hostname", "").strip()
             if hostname:
                 message += f" and select {hostname} when it appears."
@@ -1388,22 +1406,27 @@ class ProvisioningWizard(tk.Tk):
     def _request_reboot_from_completion(self, dialog, reboot_button):
         reboot_button.config(state="disabled", text="Rebooting...")
         dialog.update_idletasks()
-        result = run_command(["sudo", "-n", "reboot"], timeout=10)
-        if result.returncode == 0:
-            try:
-                dialog.grab_release()
-            except tk.TclError:
-                pass
-            dialog.destroy()
-            self.destroy()
+        try:
+            Path(REBOOT_REQUEST_FILE).write_text(
+                f"reboot requested by GUI pid {os.getpid()} at {time.time()}\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            reboot_button.config(state="normal", text="Reboot")
+            messagebox.showerror(
+                "Reboot failed",
+                "Could not request reboot from the provisioning backend.\n\n"
+                f"{exc}",
+            )
             return
 
-        reboot_button.config(state="normal", text="Reboot")
-        messagebox.showerror(
-            "Reboot failed",
-            "Could not reboot automatically.\n\n"
-            f"{result.stderr.strip() or result.stdout.strip() or 'sudo reboot failed.'}",
-        )
+        tk.Label(
+            dialog,
+            text="Reboot requested. The device should restart momentarily.",
+            bg=BG,
+            fg=SUCCESS,
+            font=FONT_LABEL,
+        ).pack(anchor="w", padx=35, pady=(0, 20))
 
     def _show_provision_log_window(self):
         dialog = tk.Toplevel(self)

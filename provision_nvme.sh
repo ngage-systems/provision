@@ -16,7 +16,7 @@ set -euo pipefail
 # - Enable services, kiosk settings, and seatd (with stim2 startup delay)
 # - Save full log to /var/log/provision/provision_nvme_YYYYMMDD_HHMMSS.log on NVMe rootfs
 # - Configure EEPROM boot order to prefer NVMe
-# - Reboot
+# - Wait for the GUI to request reboot
 
 LOG_PREFIX=""
 HB_WIFI_SCAN_FILE="/tmp/hb_wifi_scan_ssids.txt"
@@ -25,6 +25,8 @@ HB_POST_UPDATE_ATTEMPTED="${HB_POST_UPDATE_ATTEMPTED:-0}"
 HB_SELFUPDATE_NO_INTERNET="${HB_SELFUPDATE_NO_INTERNET:-0}"
 HB_LOG_FILE=""
 ANSWERS_FILE="${HB_PROVISION_ANSWERS:-/tmp/hb_provision_answers.json}"
+HB_REBOOT_REQUEST_FILE="${HB_PROVISION_REBOOT_REQUEST_FILE:-/tmp/hb_provision_reboot_requested}"
+HB_PROVISION_COMPLETE_MARKER="Provisioning complete. Waiting for GUI reboot request."
 
 ANSWER_DEFAULTS_GROUP=""
 ANSWER_DEFAULTS_DEVICE_TYPE=""
@@ -2135,10 +2137,25 @@ EOF
   fi
 }
 
+wait_for_gui_reboot_request() {
+  rm -f "$HB_REBOOT_REQUEST_FILE"
+  log "$HB_PROVISION_COMPLETE_MARKER"
+  log "Click Reboot in the GUI to finish setup and start the newly installed system."
+
+  while [[ ! -e "$HB_REBOOT_REQUEST_FILE" ]]; do
+    sleep 1
+  done
+
+  rm -f "$HB_REBOOT_REQUEST_FILE"
+  log "Reboot requested from GUI. Rebooting now..."
+  reboot || die "Reboot command failed after GUI request."
+}
+
 main() {
   setup_logging
   parse_args "$@"
   require_root
+  rm -f "$HB_REBOOT_REQUEST_FILE"
   load_answers_json "$ANSWERS_FILE"
   apply_answer_defaults_env
   load_defaults
@@ -2245,7 +2262,7 @@ main() {
 
   set_eeprom_boot_to_nvme
 
-  log "Provisioning complete. Reboot from the GUI when ready to start the newly installed system."
+  wait_for_gui_reboot_request
 }
 
 main "$@"
