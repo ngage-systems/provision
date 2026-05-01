@@ -913,10 +913,19 @@ class ProvisioningWizard(tk.Tk):
     def _make_button(self, parent, text, command, primary=False):
         bg = ACCENT if primary else ENTRY_BG
         active = ACCENT_ACTIVE if primary else "#45475a"
-        return tk.Button(
+        invoked_at = {"time": 0.0}
+
+        def invoke_once():
+            now = time.monotonic()
+            if now - invoked_at["time"] < 0.25:
+                return
+            invoked_at["time"] = now
+            command()
+
+        button = tk.Button(
             parent,
             text=text,
-            command=command,
+            command=invoke_once,
             bg=bg,
             fg=FG,
             activebackground=active,
@@ -928,13 +937,25 @@ class ProvisioningWizard(tk.Tk):
             borderwidth=0,
             highlightthickness=0,
             cursor="hand2",
+            takefocus=0,
         )
+        self._bind_touch_release(button, invoke_once)
+        return button
 
     def _make_keyboard_button(self, parent, text, command, width=4):
-        return tk.Button(
+        invoked_at = {"time": 0.0}
+
+        def invoke_once():
+            now = time.monotonic()
+            if now - invoked_at["time"] < 0.25:
+                return
+            invoked_at["time"] = now
+            command()
+
+        button = tk.Button(
             parent,
             text=text,
-            command=command,
+            command=invoke_once,
             bg=BG,
             fg=FG,
             activebackground="#45475a",
@@ -947,6 +968,36 @@ class ProvisioningWizard(tk.Tk):
             highlightthickness=0,
             takefocus=0,
         )
+        self._bind_touch_release(button, invoke_once)
+        return button
+
+    def _bind_touch_release(self, button, command):
+        def on_release(event):
+            if str(button.cget("state")) == tk.DISABLED:
+                return None
+            if button.winfo_containing(event.x_root, event.y_root) is button:
+                command()
+                return "break"
+            return None
+
+        button.bind("<ButtonRelease-1>", on_release, add="+")
+
+    def _finalize_modal(self, dialog, focus_widget=None, parent=None, geometry=None):
+        if parent is not None:
+            dialog.transient(parent)
+        if geometry is not None:
+            dialog.geometry(geometry)
+        dialog.update_idletasks()
+        try:
+            dialog.wait_visibility()
+        except tk.TclError:
+            return
+        dialog.lift()
+        dialog.grab_set()
+        if focus_widget is not None and focus_widget.winfo_exists():
+            focus_widget.focus_set()
+        else:
+            dialog.focus_set()
 
     def _build_touch_keyboard(self):
         self._keyboard_rows_frame = tk.Frame(self.keyboard, bg=ENTRY_BG)
@@ -1130,8 +1181,6 @@ class ProvisioningWizard(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("Install new system?")
         dialog.configure(bg=BG)
-        dialog.transient(self)
-        dialog.grab_set()
 
         result = tk.BooleanVar(value=False)
 
@@ -1175,8 +1224,7 @@ class ProvisioningWizard(tk.Tk):
         dialog.update_idletasks()
         x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
         y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
-        dialog.geometry(f"+{x}+{y}")
-        yes_button.focus_set()
+        self._finalize_modal(dialog, focus_widget=yes_button, parent=self, geometry=f"+{x}+{y}")
         dialog.wait_window()
 
         if not result.get():
@@ -1358,9 +1406,6 @@ class ProvisioningWizard(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("Provisioning complete")
         dialog.configure(bg=BG)
-        dialog.transient(parent)
-        dialog.grab_set()
-        dialog.geometry("860x430+210+120")
 
         tk.Label(
             dialog,
@@ -1400,8 +1445,12 @@ class ProvisioningWizard(tk.Tk):
         reboot_button.pack(side="right")
 
         dialog.protocol("WM_DELETE_WINDOW", lambda: None)
-        dialog.update_idletasks()
-        reboot_button.focus_set()
+        self._finalize_modal(
+            dialog,
+            focus_widget=reboot_button,
+            parent=parent,
+            geometry="860x430+210+120",
+        )
 
     def _request_reboot_from_completion(self, dialog, reboot_button):
         reboot_button.config(state="disabled", text="Rebooting...")
@@ -1432,13 +1481,11 @@ class ProvisioningWizard(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("NVMe provisioning log")
         dialog.configure(bg=BG)
-        dialog.geometry("1120x720+80+50")
         dialog.minsize(800, 500)
-        dialog.grab_set()
 
         tk.Label(
             dialog,
-            text="Provisioning NVMe",
+            text="Provisioning System",
             bg=BG,
             fg=FG,
             font=FONT_TITLE,
@@ -1488,8 +1535,7 @@ class ProvisioningWizard(tk.Tk):
         close_button.config(state="disabled")
         close_button.pack(side="right")
 
-        dialog.update_idletasks()
-        dialog.focus_set()
+        self._finalize_modal(dialog, parent=self, geometry="1120x720+80+50")
         return dialog, status_label, log_text, close_button
 
     def _append_provision_log(self, log_text, text):
@@ -1582,9 +1628,6 @@ class ProvisioningWizard(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title(title)
         dialog.configure(bg=BG)
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.geometry("760x220+260+180")
         dialog.minsize(640, 200)
         tk.Label(
             dialog,
@@ -1602,7 +1645,7 @@ class ProvisioningWizard(tk.Tk):
             justify="left",
             wraplength=680,
         ).pack(anchor="w", fill="x", padx=30, pady=(0, 25))
-        dialog.update_idletasks()
+        self._finalize_modal(dialog, parent=self, geometry="760x220+260+180")
         return dialog
 
     def _show_timed_message(self, title, text, milliseconds=2000):
@@ -1614,9 +1657,6 @@ class ProvisioningWizard(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("Wi-Fi test failed")
         dialog.configure(bg=BG)
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.geometry("820x300+230+180")
 
         tk.Label(
             dialog,
@@ -1643,10 +1683,17 @@ class ProvisioningWizard(tk.Tk):
         action = tk.StringVar(value="")
         buttons = tk.Frame(dialog, bg=BG)
         buttons.pack(fill="x", padx=30, pady=(0, 25))
-        self._make_button(buttons, "Try Again", lambda: action.set("retry"), primary=True).pack(side="left")
+        retry_button = self._make_button(buttons, "Try Again", lambda: action.set("retry"), primary=True)
+        retry_button.pack(side="left")
         self._make_button(buttons, "Edit Wi-Fi", lambda: action.set("edit")).pack(side="left", padx=15)
         self._make_button(buttons, "Continue Anyway", lambda: action.set("continue")).pack(side="right")
 
+        self._finalize_modal(
+            dialog,
+            focus_widget=retry_button,
+            parent=self,
+            geometry="820x300+230+180",
+        )
         dialog.wait_variable(action)
         choice = action.get()
         dialog.grab_release()
