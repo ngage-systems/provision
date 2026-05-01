@@ -9,6 +9,7 @@ launches provision_nvme.sh after the user confirms the destructive erase step.
 
 import argparse
 import configparser
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,15 @@ import time
 import tkinter as tk
 from tkinter import messagebox
 import uuid
+
+try:
+    import dbus
+    import dbus.service
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib
+    _DBUS_AVAILABLE = True
+except Exception:
+    _DBUS_AVAILABLE = False
 
 
 # ---- Theme / sizing ----
@@ -615,6 +625,132 @@ def safe_connection_name(ssid):
     return f"hb-wifi-{safe_ssid or 'network'}-{uuid.uuid4().hex[:8]}"
 
 
+NM_AGENT_IFACE = "org.freedesktop.NetworkManager.SecretAgent"
+NM_AGENT_PATH = "/org/freedesktop/NetworkManager/SecretAgent"
+NM_AGENT_MGR_IFACE = "org.freedesktop.NetworkManager.AgentManager"
+NM_AGENT_MGR_PATH = "/org/freedesktop/NetworkManager/AgentManager"
+NM_BUS_NAME = "org.freedesktop.NetworkManager"
+NM_NO_SECRETS_ERROR = "org.freedesktop.NetworkManager.SecretManager.NoSecrets"
+
+
+if _DBUS_AVAILABLE:
+
+    class HBSecretAgent(dbus.service.Object):
+        """Temporary NetworkManager secret agent used during the Wi-Fi test.
+
+        Returns the user-typed PSK on the first GetSecrets call. On any subsequent
+        call (or any call carrying the REQUEST_NEW flag, which means NM has
+        already determined the previous secret was wrong) it raises NoSecrets so
+        NetworkManager gives up immediately. This prevents the desktop secret
+        agent (nm-applet et al.) from popping its own dialog and silently
+        substituting a different password than what the user typed in our GUI.
+        """
+
+        def __init__(self, bus, typed_psk):
+            super().__init__(bus, NM_AGENT_PATH)
+            self._psk = typed_psk
+            self._answered = False
+
+        @dbus.service.method(
+            NM_AGENT_IFACE,
+            in_signature="a{sa{sv}}osasu",
+            out_signature="a{sa{sv}}",
+        )
+        def GetSecrets(self, connection, conn_path, setting_name, hints, flags):
+            request_new = bool(flags & 0x2)
+            if self._answered or request_new:
+                raise dbus.DBusException("No secrets available", name=NM_NO_SECRETS_ERROR)
+            self._answered = True
+            if str(setting_name) == "802-11-wireless-security":
+                return {
+                    "802-11-wireless-security": {
+                        "psk": dbus.String(self._psk),
+                    }
+                }
+            raise dbus.DBusException("No secrets available", name=NM_NO_SECRETS_ERROR)
+
+        @dbus.service.method(NM_AGENT_IFACE, in_signature="osas", out_signature="")
+        def CancelGetSecrets(self, conn_path, setting_name):
+            return None
+
+        @dbus.service.method(NM_AGENT_IFACE, in_signature="a{sa{sv}}o", out_signature="")
+        def SaveSecrets(self, connection, conn_path):
+            return None
+
+        @dbus.service.method(NM_AGENT_IFACE, in_signature="a{sa{sv}}o", out_signature="")
+        def DeleteSecrets(self, connection, conn_path):
+            return None
+
+
+@contextmanager
+def hb_secret_agent(typed_psk):
+    """Register a transient NM secret agent for the duration of the with-block.
+
+    Falls back silently (yields None) if dbus / pygobject / NetworkManager are
+    not available. Callers should not depend on the yielded value; the agent
+    works purely as a side-effect on the system bus.
+    """
+    if not _DBUS_AVAILABLE:
+        yield None
+        return
+
+    bus = None
+    agent = None
+    mgr = None
+    loop = None
+    thread = None
+    registered = False
+    try:
+        DBusGMainLoop(set_as_default=True)
+        bus = dbus.SystemBus()
+        agent = HBSecretAgent(bus, typed_psk)
+        mgr = bus.get_object(NM_BUS_NAME, NM_AGENT_MGR_PATH)
+        mgr.Register("com.homebase.provision", dbus_interface=NM_AGENT_MGR_IFACE)
+        registered = True
+        loop = GLib.MainLoop()
+        thread = threading.Thread(target=loop.run, daemon=True)
+        thread.start()
+    except Exception:
+        if registered and mgr is not None:
+            try:
+                mgr.Unregister(dbus_interface=NM_AGENT_MGR_IFACE)
+            except Exception:
+                pass
+        if loop is not None:
+            try:
+                loop.quit()
+            except Exception:
+                pass
+        if agent is not None:
+            try:
+                agent.remove_from_connection()
+            except Exception:
+                pass
+        yield None
+        return
+
+    try:
+        yield agent
+    finally:
+        if registered and mgr is not None:
+            try:
+                mgr.Unregister(dbus_interface=NM_AGENT_MGR_IFACE)
+            except Exception:
+                pass
+        if loop is not None:
+            try:
+                loop.quit()
+            except Exception:
+                pass
+        if thread is not None:
+            thread.join(timeout=2)
+        if agent is not None:
+            try:
+                agent.remove_from_connection()
+            except Exception:
+                pass
+
+
 def test_wifi_connection(ssid, password):
     if not ssid:
         return {"ok": True, "tested": False, "internet_reachable": False, "message": "Wi-Fi skipped."}
@@ -700,32 +836,43 @@ def test_wifi_connection(ssid, password):
                 "message": f"NetworkManager rejected the password settings for '{ssid}'.",
             }
 
-        result = nmcli(["-w", "60", "con", "up", connection_name, "ifname", iface], timeout=70)
-        if result.returncode != 0:
-            return {
-                "ok": False,
-                "tested": True,
-                "internet_reachable": False,
-                "message": f"Failed to connect to '{ssid}'. Check the password and try again.",
-            }
-        connected_connection = True
+        actual_password = None
+        with hb_secret_agent(password):
+            result = nmcli(["-w", "60", "con", "up", connection_name, "ifname", iface], timeout=70)
+            if result.returncode != 0:
+                return {
+                    "ok": False,
+                    "tested": True,
+                    "internet_reachable": False,
+                    "message": f"Failed to connect to '{ssid}'. Check the password and try again.",
+                }
+            connected_connection = True
 
-        got_ssid = connected_wifi_ssid()
-        if got_ssid != ssid:
-            return {
-                "ok": False,
-                "tested": True,
-                "internet_reachable": False,
-                "message": f"Connected Wi-Fi mismatch. Expected '{ssid}', got '{got_ssid or '<none>'}'.",
-            }
+            got_ssid = connected_wifi_ssid()
+            if got_ssid != ssid:
+                return {
+                    "ok": False,
+                    "tested": True,
+                    "internet_reachable": False,
+                    "message": f"Connected Wi-Fi mismatch. Expected '{ssid}', got '{got_ssid or '<none>'}'.",
+                }
 
-        if not wait_for_ipv4(iface):
-            return {
-                "ok": False,
-                "tested": True,
-                "internet_reachable": False,
-                "message": f"Connected to '{ssid}', but no IPv4 address was acquired.",
-            }
+            if not wait_for_ipv4(iface):
+                return {
+                    "ok": False,
+                    "tested": True,
+                    "internet_reachable": False,
+                    "message": f"Connected to '{ssid}', but no IPv4 address was acquired.",
+                }
+
+            try:
+                psk_result = nmcli(["-s", "con", "show", connection_name, "wifi-sec.psk"], timeout=10)
+                for line in psk_result.stdout.splitlines():
+                    if "wifi-sec.psk:" in line:
+                        actual_password = line.split(":", 1)[1].strip()
+                        break
+            except Exception:
+                pass
 
         internet_ok = internet_reachable_via_iface(iface)
         restore_message = restore_previous_connection()
@@ -736,16 +883,6 @@ def test_wifi_connection(ssid, password):
             message += " Leaving this Wi-Fi connected for provisioning."
         if not internet_ok:
             message += " Internet probe over Wi-Fi failed; Ethernet may still provide internet."
-
-        actual_password = None
-        try:
-            psk_result = nmcli(["-s", "con", "show", connection_name, "wifi-sec.psk"], timeout=10)
-            for line in psk_result.stdout.splitlines():
-                if "wifi-sec.psk:" in line:
-                    actual_password = line.split(":", 1)[1].strip()
-                    break
-        except Exception:
-            pass
 
         return {
             "ok": True,
@@ -1392,7 +1529,7 @@ class ProvisioningWizard(tk.Tk):
 
     def _provision_running_message(self):
         message = (
-            "Provisioning new system. This will take about 5-10 mins. "
+            "This will take about 5-10 mins. "
             "When it is complete, you will be asked to reboot this device."
         )
         mesh_workgroup = self._selected_mesh_workgroup()
@@ -1708,6 +1845,51 @@ class ProvisioningWizard(tk.Tk):
             focus_widget=retry_button,
             parent=self,
             geometry="820x300+230+180",
+        )
+        dialog.wait_variable(action)
+        choice = action.get()
+        dialog.grab_release()
+        dialog.destroy()
+        return choice
+
+    def _ask_wifi_verify_action(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("Re-enter Wi-Fi password")
+        dialog.configure(bg=BG)
+
+        tk.Label(
+            dialog,
+            text="Re-enter Wi-Fi password",
+            bg=BG,
+            fg=ERROR,
+            font=FONT_TITLE,
+        ).pack(anchor="w", padx=30, pady=(25, 10))
+        tk.Label(
+            dialog,
+            text=(
+                "The password that worked isn't the one you typed here. "
+                "Only the password typed in this window is saved to the new device, "
+                "so the password must be entered correctly here."
+            ),
+            bg=BG,
+            fg=FG,
+            font=FONT_LABEL,
+            justify="left",
+            wraplength=760,
+        ).pack(anchor="w", padx=30, pady=(0, 20))
+
+        action = tk.StringVar(value="")
+        buttons = tk.Frame(dialog, bg=BG)
+        buttons.pack(fill="x", padx=30, pady=(0, 25))
+        retry_button = self._make_button(buttons, "Re-enter Password", lambda: action.set("retry"), primary=True)
+        retry_button.pack(side="left")
+        self._make_button(buttons, "Edit Wi-Fi", lambda: action.set("edit")).pack(side="left", padx=15)
+
+        self._finalize_modal(
+            dialog,
+            focus_widget=retry_button,
+            parent=self,
+            geometry="820x260+230+200",
         )
         dialog.wait_variable(action)
         choice = action.get()
@@ -2361,9 +2543,14 @@ class ProvisioningWizard(tk.Tk):
 
                     if result["ok"]:
                         actual_password = result.get("actual_password")
-                        if actual_password and actual_password != value:
-                            self.answers["wifi_password"] = actual_password
-                            value = actual_password
+                        if actual_password is None or actual_password != value:
+                            self.answers["wifi_test_passed"] = False
+                            self._last_wifi_test_signature = None
+                            verify_action = self._ask_wifi_verify_action()
+                            if verify_action == "edit":
+                                self.step_index = self.steps.index(self._step_wifi_ssid)
+                                self._render_current_step()
+                            return False
                         internet_ok = have_internet()
                         self.answers["wifi_internet_reachable"] = internet_ok
                         if not internet_ok:

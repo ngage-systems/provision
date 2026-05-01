@@ -601,7 +601,8 @@ install_packages() {
     dosfstools e2fsprogs \
     iw network-manager \
     git \
-    rpi-eeprom
+    rpi-eeprom \
+    python3-dbus python3-gi gir1.2-nm-1.0
 }
 
 download_image_xz() {
