@@ -11,6 +11,7 @@ import argparse
 import configparser
 from contextlib import contextmanager
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -50,16 +51,28 @@ FONT_LABEL = ("DejaVu Sans", 14)
 FONT_REVIEW = ("DejaVu Sans", 12)
 FONT_INPUT = ("DejaVu Sans", 16)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
-FONT_KEYBOARD = ("DejaVu Sans", 15)
 
-KEYBOARD_FRAME_PADX = 20
-KEYBOARD_FRAME_PADY = 11
-KEYBOARD_ROW_INDENT_UNIT = 20
-KEYBOARD_KEY_PADX = 3
-KEYBOARD_KEY_PADY = 7
-KEYBOARD_ROW_PADY = 3
-KEYBOARD_CONTROLS_PADY = (5, 0)
-KEYBOARD_CONTROL_PADX = 4
+
+def _keyboard_scale(n):
+    """Scale on-screen keyboard dimensions ~10% larger (x and y spacing/size)."""
+    return max(1, int(math.ceil(float(n) * 1.1 - 1e-9)))
+
+
+FONT_KEYBOARD = ("DejaVu Sans", _keyboard_scale(15))
+
+KEYBOARD_FRAME_PADX = _keyboard_scale(20)
+KEYBOARD_FRAME_PADY = _keyboard_scale(11)
+KEYBOARD_ROW_INDENT_UNIT = _keyboard_scale(20)
+KEYBOARD_KEY_PADX = _keyboard_scale(3)
+KEYBOARD_KEY_PADY = _keyboard_scale(7)
+KEYBOARD_ROW_PADY = _keyboard_scale(3)
+KEYBOARD_CONTROLS_PADY = (_keyboard_scale(5), 0)
+KEYBOARD_CONTROL_PADX = _keyboard_scale(4)
+KEYBOARD_KEY_CHAR_WIDTH = _keyboard_scale(4)
+KEYBOARD_CTRL_SHIFT_W = _keyboard_scale(7)
+KEYBOARD_CTRL_SPACE_W = _keyboard_scale(18)
+KEYBOARD_CTRL_BACKSPACE_W = _keyboard_scale(10)
+KEYBOARD_CTRL_SMALL_W = _keyboard_scale(7)
 
 DEFAULT_WIFI_COUNTRY = "US"
 DEFAULT_TIMEZONE = "America/New_York"
@@ -1142,7 +1155,9 @@ class ProvisioningWizard(tk.Tk):
         self._bind_touch_release(button, invoke_once)
         return button
 
-    def _make_keyboard_button(self, parent, text, command, width=4):
+    def _make_keyboard_button(self, parent, text, command, width=None):
+        if width is None:
+            width = KEYBOARD_KEY_CHAR_WIDTH
         invoked_at = {"time": 0.0}
 
         def invoke_once():
@@ -1240,19 +1255,19 @@ class ProvisioningWizard(tk.Tk):
 
         shift_text = "Shift" if not self._keyboard_shift else "SHIFT"
         self._make_keyboard_button(
-            controls, shift_text, self._keyboard_toggle_shift, width=7
+            controls, shift_text, self._keyboard_toggle_shift, width=KEYBOARD_CTRL_SHIFT_W
         ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
         self._make_keyboard_button(
-            controls, "Space", lambda: self._keyboard_insert(" "), width=18
+            controls, "Space", lambda: self._keyboard_insert(" "), width=KEYBOARD_CTRL_SPACE_W
         ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
         self._make_keyboard_button(
-            controls, "Backspace", self._keyboard_backspace, width=10
+            controls, "Backspace", self._keyboard_backspace, width=KEYBOARD_CTRL_BACKSPACE_W
         ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
         self._make_keyboard_button(
-            controls, "Clear", self._keyboard_clear, width=7
+            controls, "Clear", self._keyboard_clear, width=KEYBOARD_CTRL_SMALL_W
         ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
         self._make_keyboard_button(
-            controls, "Hide", self._hide_touch_keyboard, width=7
+            controls, "Hide", self._hide_touch_keyboard, width=KEYBOARD_CTRL_SMALL_W
         ).pack(side="left", padx=KEYBOARD_CONTROL_PADX)
 
     def _show_touch_keyboard(self, entry):
