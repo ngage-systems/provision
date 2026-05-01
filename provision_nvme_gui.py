@@ -669,7 +669,7 @@ if _DBUS_AVAILABLE:
                 }
             raise dbus.DBusException("No secrets available", name=NM_NO_SECRETS_ERROR)
 
-        @dbus.service.method(NM_AGENT_IFACE, in_signature="osas", out_signature="")
+        @dbus.service.method(NM_AGENT_IFACE, in_signature="os", out_signature="")
         def CancelGetSecrets(self, conn_path, setting_name):
             return None
 
