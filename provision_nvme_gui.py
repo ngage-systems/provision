@@ -737,11 +737,22 @@ def test_wifi_connection(ssid, password):
         if not internet_ok:
             message += " Internet probe over Wi-Fi failed; Ethernet may still provide internet."
 
+        actual_password = None
+        try:
+            psk_result = nmcli(["-s", "con", "show", connection_name, "wifi-sec.psk"], timeout=10)
+            for line in psk_result.stdout.splitlines():
+                if "wifi-sec.psk:" in line:
+                    actual_password = line.split(":", 1)[1].strip()
+                    break
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "tested": True,
             "internet_reachable": internet_ok,
             "message": message,
+            "actual_password": actual_password,
         }
     finally:
         if not connected_connection:
@@ -1673,7 +1684,9 @@ class ProvisioningWizard(tk.Tk):
                 "We could not connect to this Wi-Fi network from the current location. "
                 "The password may be wrong, or this device may be using Wi-Fi settings "
                 "for another site.\n\n"
-                f"{message}"
+                f"{message}\n\n"
+                "If you continue anyway, the password you entered will be written to the "
+                "device as-is. If it is wrong, the device will not connect to Wi-Fi after restarting."
             ),
             bg=BG,
             fg=FG,
@@ -2347,6 +2360,10 @@ class ProvisioningWizard(tk.Tk):
                     self.answers["wifi_test_message"] = result["message"]
 
                     if result["ok"]:
+                        actual_password = result.get("actual_password")
+                        if actual_password and actual_password != value:
+                            self.answers["wifi_password"] = actual_password
+                            value = actual_password
                         internet_ok = have_internet()
                         self.answers["wifi_internet_reachable"] = internet_ok
                         if not internet_ok:
