@@ -625,6 +625,63 @@ def safe_connection_name(ssid):
     return f"hb-wifi-{safe_ssid or 'network'}-{uuid.uuid4().hex[:8]}"
 
 
+def _strip_nmcli_secret_value(raw):
+    """Normalize a secret string from nmcli -g or tabular output."""
+    if raw is None:
+        return ""
+    val = raw.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+        val = val[1:-1]
+    return val.strip()
+
+
+def read_connection_wifi_psk(connection_name):
+    """Read the WPA PSK NetworkManager has for this connection (best-effort; needs nmcli -s)."""
+    for field in ("wifi-sec.psk", "802-11-wireless-security.psk"):
+        result = nmcli(["-s", "-g", field, "con", "show", connection_name], timeout=10)
+        if result.returncode != 0 or not (result.stdout or "").strip():
+            continue
+        line = (result.stdout or "").splitlines()[0]
+        val = _strip_nmcli_secret_value(line)
+        if not val or val == "--" or val.lower() in ("<hidden>", "****"):
+            continue
+        if re.fullmatch(r"\*+", val):
+            continue
+        return val
+
+    result = nmcli(["-s", "con", "show", connection_name], timeout=15)
+    if result.returncode != 0:
+        return None
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        m = re.match(r"(?:802-11-wireless-security|wifi-sec)\.psk:\s*(.*)$", line)
+        if not m:
+            continue
+        val = _strip_nmcli_secret_value(m.group(1))
+        if not val or val == "--" or val.lower() in ("<hidden>", "****"):
+            continue
+        if re.fullmatch(r"\*+", val):
+            continue
+        return val
+    return None
+
+
+def wifi_psk_matches_nm(actual, typed):
+    """True if NM-reported PSK matches what the user entered (after normalisation)."""
+    if typed is None:
+        return False
+    if actual is None:
+        return False
+    a = (actual or "").strip()
+    t = (typed or "").strip()
+    if a == t:
+        return True
+    if len(a) == 64 and len(t) == 64:
+        if re.fullmatch(r"(?i)[0-9a-f]{64}", a) and re.fullmatch(r"(?i)[0-9a-f]{64}", t):
+            return a.lower() == t.lower()
+    return False
+
+
 NM_AGENT_IFACE = "org.freedesktop.NetworkManager.SecretAgent"
 NM_AGENT_PATH = "/org/freedesktop/NetworkManager/SecretAgent"
 NM_AGENT_MGR_IFACE = "org.freedesktop.NetworkManager.AgentManager"
@@ -836,7 +893,6 @@ def test_wifi_connection(ssid, password):
                 "message": f"NetworkManager rejected the password settings for '{ssid}'.",
             }
 
-        actual_password = None
         with hb_secret_agent(password):
             result = nmcli(["-w", "60", "con", "up", connection_name, "ifname", iface], timeout=70)
             if result.returncode != 0:
@@ -865,14 +921,9 @@ def test_wifi_connection(ssid, password):
                     "message": f"Connected to '{ssid}', but no IPv4 address was acquired.",
                 }
 
-            try:
-                psk_result = nmcli(["-s", "con", "show", connection_name, "wifi-sec.psk"], timeout=10)
-                for line in psk_result.stdout.splitlines():
-                    if "wifi-sec.psk:" in line:
-                        actual_password = line.split(":", 1)[1].strip()
-                        break
-            except Exception:
-                pass
+            actual_password = read_connection_wifi_psk(connection_name)
+            if not actual_password:
+                actual_password = password
 
         internet_ok = internet_reachable_via_iface(iface)
         restore_message = restore_previous_connection()
@@ -2589,7 +2640,7 @@ class ProvisioningWizard(tk.Tk):
 
                     if result["ok"]:
                         actual_password = result.get("actual_password")
-                        if actual_password is None or actual_password != value:
+                        if not wifi_psk_matches_nm(actual_password, value):
                             self.answers["wifi_test_passed"] = False
                             self._last_wifi_test_signature = None
                             verify_action = self._ask_wifi_verify_action()
