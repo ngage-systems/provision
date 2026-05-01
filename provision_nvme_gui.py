@@ -939,7 +939,7 @@ class ProvisioningWizard(tk.Tk):
             cursor="hand2",
             takefocus=0,
         )
-        self._bind_touch_release(button, invoke_once)
+        self._bind_touch_press(button, invoke_once)
         return button
 
     def _make_keyboard_button(self, parent, text, command, width=4):
@@ -968,19 +968,17 @@ class ProvisioningWizard(tk.Tk):
             highlightthickness=0,
             takefocus=0,
         )
-        self._bind_touch_release(button, invoke_once)
+        self._bind_touch_press(button, invoke_once)
         return button
 
-    def _bind_touch_release(self, button, command):
-        def on_release(event):
+    def _bind_touch_press(self, button, command):
+        def on_press(_event):
             if str(button.cget("state")) == tk.DISABLED:
                 return None
-            if button.winfo_containing(event.x_root, event.y_root) is button:
-                command()
-                return "break"
-            return None
+            command()
+            return "break"
 
-        button.bind("<ButtonRelease-1>", on_release, add="+")
+        button.bind("<ButtonPress-1>", on_press, add="+")
 
     def _finalize_modal(self, dialog, focus_widget=None, parent=None, geometry=None):
         if parent is not None:
@@ -1535,7 +1533,7 @@ class ProvisioningWizard(tk.Tk):
         close_button.config(state="disabled")
         close_button.pack(side="right")
 
-        self._finalize_modal(dialog, parent=self, geometry="1120x720+80+50")
+        self._finalize_modal(dialog, geometry="1120x720+80+50")
         return dialog, status_label, log_text, close_button
 
     def _append_provision_log(self, log_text, text):
