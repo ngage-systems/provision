@@ -811,6 +811,7 @@ class ProvisioningWizard(tk.Tk):
 
         self._build_layout()
         self._render_current_step()
+        self.focus_force()
 
     def _configure_window_size(self):
         screen_w = max(1, self.winfo_screenwidth())
@@ -939,7 +940,7 @@ class ProvisioningWizard(tk.Tk):
             cursor="hand2",
             takefocus=0,
         )
-        self._bind_touch_press(button, invoke_once)
+        self._bind_touch_release(button, invoke_once)
         return button
 
     def _make_keyboard_button(self, parent, text, command, width=4):
@@ -968,17 +969,19 @@ class ProvisioningWizard(tk.Tk):
             highlightthickness=0,
             takefocus=0,
         )
-        self._bind_touch_press(button, invoke_once)
+        self._bind_touch_release(button, invoke_once)
         return button
 
-    def _bind_touch_press(self, button, command):
-        def on_press(_event):
+    def _bind_touch_release(self, button, command):
+        def on_release(event):
             if str(button.cget("state")) == tk.DISABLED:
                 return None
-            command()
-            return "break"
+            if button.winfo_containing(event.x_root, event.y_root) is button:
+                command()
+                return "break"
+            return None
 
-        button.bind("<ButtonPress-1>", on_press, add="+")
+        button.bind("<ButtonRelease-1>", on_release, add="+")
 
     def _finalize_modal(self, dialog, focus_widget=None, parent=None, geometry=None):
         if parent is not None:
@@ -993,9 +996,9 @@ class ProvisioningWizard(tk.Tk):
         dialog.lift()
         dialog.grab_set()
         if focus_widget is not None and focus_widget.winfo_exists():
-            focus_widget.focus_set()
+            focus_widget.focus_force()
         else:
-            dialog.focus_set()
+            dialog.focus_force()
 
     def _build_touch_keyboard(self):
         self._keyboard_rows_frame = tk.Frame(self.keyboard, bg=ENTRY_BG)
@@ -1224,6 +1227,7 @@ class ProvisioningWizard(tk.Tk):
         y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
         self._finalize_modal(dialog, focus_widget=yes_button, parent=self, geometry=f"+{x}+{y}")
         dialog.wait_window()
+        self.focus_force()
 
         if not result.get():
             return False
