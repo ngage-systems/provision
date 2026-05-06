@@ -1920,17 +1920,38 @@ cleanup_mounts() {
 
 mount_chroot_env() {
   local root_mnt="$1"
+  local chroot_resolv="${root_mnt}/etc/resolv.conf"
+  local systemd_real="/run/systemd/resolve/resolv.conf"
+  local flattened=0
+
   mount --bind /dev "${root_mnt}/dev"
   mount --bind /dev/pts "${root_mnt}/dev/pts"
   mount -t proc proc "${root_mnt}/proc"
   mount -t sysfs sys "${root_mnt}/sys"
-  # Fresh image often uses systemd-resolved (127.0.0.53); resolved is not running in chroot.
-  if [[ -f /etc/resolv.conf ]] || [[ -L /etc/resolv.conf ]]; then
-    if ! mount --bind /etc/resolv.conf "${root_mnt}/etc/resolv.conf"; then
-      log "WARNING: Could not bind-mount host /etc/resolv.conf into chroot; apt/git inside chroot may fail DNS resolution."
+
+  # Prefer a flattened resolv.conf: real upstream nameservers. Host /etc/resolv.conf often
+  # points at 127.0.0.53 or symlinks into /run/systemd/resolve/; the chroot has a different
+  # /run tree, so bind-mounting the stub symlink can break DNS. systemd publishes upstreams
+  # in /run/systemd/resolve/resolv.conf when systemd-resolved is active.
+  if [[ -r "$systemd_real" ]] \
+    && awk '/^nameserver[[:space:]]+/ && $2 != "127.0.0.53" { ok=1 } END { exit !ok }' "$systemd_real" 2>/dev/null; then
+    if cp -- "$systemd_real" "$chroot_resolv" 2>/dev/null; then
+      chmod 644 "$chroot_resolv" || true
+      log "Chroot DNS: using flattened resolv.conf from $systemd_real."
+      flattened=1
+    else
+      log "WARNING: Could not copy $systemd_real to $chroot_resolv; will try bind-mounting host /etc/resolv.conf."
     fi
-  else
-    log "WARNING: Host has no /etc/resolv.conf; chroot DNS may fail (bind mount skipped)."
+  fi
+
+  if [[ "$flattened" -eq 0 ]]; then
+    if [[ -f /etc/resolv.conf ]] || [[ -L /etc/resolv.conf ]]; then
+      if ! mount --bind /etc/resolv.conf "$chroot_resolv"; then
+        log "WARNING: Could not bind-mount host /etc/resolv.conf into chroot; apt/git inside chroot may fail DNS resolution."
+      fi
+    else
+      log "WARNING: Host has no /etc/resolv.conf; chroot DNS may fail (no bind mount)."
+    fi
   fi
 }
 
