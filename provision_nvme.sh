@@ -804,6 +804,39 @@ have_internet() {
   return 1
 }
 
+# Hostnames used by apt on Raspberry Pi OS inside the NVMe chroot. Keep in sync with
+# provision_nvme_gui.py::APT_MIRROR_DNS_HOSTS.
+apt_mirror_dns_hosts() {
+  printf '%s\n' \
+    deb.debian.org \
+    archive.raspberrypi.com
+}
+
+warn_if_apt_mirror_dns_fails() {
+  local h failed=()
+
+  if ! have_cmd getent; then
+    log "WARNING: getent not available; skipping apt mirror DNS check."
+    return 0
+  fi
+  while IFS= read -r h; do
+    [[ -n "$h" ]] || continue
+    if ! getent ahosts "$h" >/dev/null 2>&1; then
+      failed+=("$h")
+    fi
+  done < <(apt_mirror_dns_hosts)
+
+  [[ "${#failed[@]}" -eq 0 ]] && return 0
+
+  local joined="" f
+  for f in "${failed[@]}"; do
+    [[ -n "$joined" ]] && joined+=", "
+    joined+="$f"
+  done
+  log "WARNING: DNS lookup failed for apt mirror hostname(s): $joined"
+  log "WARNING: Chroot apt may report \"Temporary failure resolving\" for those hosts. Check DNS (/etc/resolv.conf) and your network."
+}
+
 wait_for_internet() {
   local timeout_s="${1:-30}"
   local sleep_s="${2:-3}"
@@ -1468,7 +1501,7 @@ install_packages_host() {
   need_cmd apt-get
   log "Installing required packages on host..."
   export DEBIAN_FRONTEND=noninteractive
-  run_with_apt_lock_retry "host apt-get update" apt-get update
+  run_with_apt_lock_retry "host apt-get update" apt-get update --error-on=any
   run_with_apt_lock_retry "host apt-get install" apt-get install -y --no-install-recommends \
     wget xz-utils openssl ca-certificates \
     util-linux coreutils gawk grep sed \
@@ -1891,10 +1924,19 @@ mount_chroot_env() {
   mount --bind /dev/pts "${root_mnt}/dev/pts"
   mount -t proc proc "${root_mnt}/proc"
   mount -t sysfs sys "${root_mnt}/sys"
+  # Fresh image often uses systemd-resolved (127.0.0.53); resolved is not running in chroot.
+  if [[ -f /etc/resolv.conf ]] || [[ -L /etc/resolv.conf ]]; then
+    if ! mount --bind /etc/resolv.conf "${root_mnt}/etc/resolv.conf"; then
+      log "WARNING: Could not bind-mount host /etc/resolv.conf into chroot; apt/git inside chroot may fail DNS resolution."
+    fi
+  else
+    log "WARNING: Host has no /etc/resolv.conf; chroot DNS may fail (bind mount skipped)."
+  fi
 }
 
 unmount_chroot_env() {
   local root_mnt="$1"
+  umount "${root_mnt}/etc/resolv.conf" 2>/dev/null || true
   umount "${root_mnt}/sys" 2>/dev/null || true
   umount "${root_mnt}/proc" 2>/dev/null || true
   umount "${root_mnt}/dev/pts" 2>/dev/null || true
@@ -2044,13 +2086,13 @@ configure_nvme_packages_and_services() {
 
   host_provision_swap_activate_if_needed
 
-  if ! chroot_apt_get update \
+  if ! chroot_apt_get update --error-on=any \
     || ! chroot_apt_get -y full-upgrade \
     || ! chroot_apt_get -y clean; then
     log "WARNING: apt full-upgrade failed in NVMe rootfs. Attempting recovery..."
     chroot_cmd /usr/bin/dpkg --configure -a || true
     chroot_apt_get -y -f install || true
-    chroot_apt_get update \
+    chroot_apt_get update --error-on=any \
       && chroot_apt_get -y full-upgrade \
       && chroot_apt_get -y clean \
       || die "Failed to run apt update/full-upgrade in NVMe rootfs."
@@ -2335,6 +2377,7 @@ main() {
     die "No internet connectivity after checking $(internet_probe_targets_text). Wi-Fi may be connected but blocked by a captive portal, firewall, or a route/DNS issue."
   fi
   log "Internet connectivity verified."
+  warn_if_apt_mirror_dns_fails
 
   if [[ "$HB_SELFUPDATE_NO_INTERNET" == "1" ]]; then
     log "Self-update: retrying now that internet connectivity is verified..."

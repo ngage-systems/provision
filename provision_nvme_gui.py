@@ -486,6 +486,38 @@ def have_internet():
     return False
 
 
+# Hostnames apt uses when updating the flashed OS. Keep in sync with provision_nvme.sh::apt_mirror_dns_hosts.
+APT_MIRROR_DNS_HOSTS = ("deb.debian.org", "archive.raspberrypi.com")
+
+
+def apt_mirror_dns_failures():
+    """Return [(hostname, error_message), ...] for hosts that do not resolve."""
+    failed = []
+    for host in APT_MIRROR_DNS_HOSTS:
+        try:
+            socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            err = getattr(exc, "strerror", None) or str(exc)
+            failed.append((host, err))
+    return failed
+
+
+def warn_apt_mirror_dns_if_needed(parent=None):
+    failures = apt_mirror_dns_failures()
+    if not failures:
+        return
+    detail = "\n".join(f"  • {host}: {err}" for host, err in failures)
+    messagebox.showwarning(
+        "DNS check for software servers",
+        "Could not resolve one or more host names used when installing packages "
+        "on the new drive:\n\n"
+        f"{detail}\n\n"
+        "Provisioning may fail during the apt step unless DNS works. "
+        "If you use Wi-Fi or a strict network, check router DNS settings or /etc/resolv.conf.",
+        parent=parent,
+    )
+
+
 def git_command(repo_root, args, timeout=45):
     return run_command(["git", "-C", str(repo_root), *args], timeout=timeout)
 
@@ -1406,6 +1438,7 @@ class ProvisioningWizard(tk.Tk):
             return
 
         print(json.dumps(self.answers, indent=2, sort_keys=True))
+        warn_apt_mirror_dns_if_needed(parent=self)
         if not self._launch_backend():
             return
         self.withdraw()
