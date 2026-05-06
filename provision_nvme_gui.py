@@ -5,6 +5,10 @@ Provisioning wizard - Tkinter GUI for collecting NVMe provisioning answers.
 This replaces the old interactive shell questions with a touch-friendly flow.
 It collects answers, validates Wi-Fi when requested, writes JSON output, and
 launches provision_nvme.sh after the user confirms the destructive erase step.
+
+Disable automatic git fetch/merge to refresh this repo before the wizard runs with
+``--no-self-update`` or environment ``HB_PROVISION_NO_SELF_UPDATE=1`` (same as
+provision_nvme.sh).
 """
 
 import argparse
@@ -2010,6 +2014,13 @@ class ProvisioningWizard(tk.Tk):
         return choice
 
     def _maybe_self_update(self, phase):
+        if os.environ.get("HB_PROVISION_NO_SELF_UPDATE", "0").strip() == "1":
+            print(
+                "Self-update: disabled for this run (--no-self-update or HB_PROVISION_NO_SELF_UPDATE=1)."
+            )
+            self._self_update_retry_needed = False
+            return
+
         if not have_internet():
             self._self_update_retry_needed = True
             print(f"Self-update: no internet during {phase}; will retry after internet is available.")
@@ -2759,10 +2770,17 @@ def parse_args():
         default=DEFAULT_OUTPUT,
         help=f"Path to write JSON answers (default: {DEFAULT_OUTPUT})",
     )
+    parser.add_argument(
+        "--no-self-update",
+        action="store_true",
+        help="Do not git fetch/merge to update this repo before running (also HB_PROVISION_NO_SELF_UPDATE=1).",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.no_self_update:
+        os.environ["HB_PROVISION_NO_SELF_UPDATE"] = "1"
     app = ProvisioningWizard(output_path=args.output)
     app.mainloop()

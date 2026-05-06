@@ -6,7 +6,7 @@ set -euo pipefail
 # This script is intended to fully provision the NVMe target (not run from NVMe).
 #
 # Flow:
-# - Self-update from git when internet is available
+# - Self-update from git when internet is available (disable with --no-self-update or HB_PROVISION_NO_SELF_UPDATE=1)
 # - Read GUI-collected inputs from JSON (with defaults from device_defaults.ini)
 # - Configure Wi-Fi (optional) and verify internet connectivity
 # - Flash Raspberry Pi OS Lite arm64 to NVMe and expand the root filesystem
@@ -15,6 +15,7 @@ set -euo pipefail
 # - Install dserv stack + ESS repo in NVMe rootfs
 # - Enable services, kiosk settings, and seatd (with stim2 startup delay)
 # - Save full log to /var/log/provision/provision_nvme_YYYYMMDD_HHMMSS.log on NVMe rootfs
+# - Optional persistent swap file on host rootfs (eMMC when / is eMMC): HB_EMMC_SWAP_MB (default 2048; 0=off)
 # - Configure EEPROM boot order to prefer NVMe
 # - Wait for the GUI to request reboot
 
@@ -23,10 +24,15 @@ HB_WIFI_SCAN_FILE="/tmp/hb_wifi_scan_ssids.txt"
 HB_SELFUPDATED="${HB_SELFUPDATED:-0}"
 HB_POST_UPDATE_ATTEMPTED="${HB_POST_UPDATE_ATTEMPTED:-0}"
 HB_SELFUPDATE_NO_INTERNET="${HB_SELFUPDATE_NO_INTERNET:-0}"
+HB_PROVISION_NO_SELF_UPDATE="${HB_PROVISION_NO_SELF_UPDATE:-0}"
 HB_LOG_FILE=""
 ANSWERS_FILE="${HB_PROVISION_ANSWERS:-/tmp/hb_provision_answers.json}"
 HB_REBOOT_REQUEST_FILE="${HB_PROVISION_REBOOT_REQUEST_FILE:-/tmp/hb_provision_reboot_requested}"
 HB_PROVISION_COMPLETE_MARKER="Provisioning complete. Waiting for GUI reboot request."
+
+# Persistent swap on host rootfs (eMMC when booting from eMMC). Adds /etc/fstab entry. HB_EMMC_SWAP_MB=0 disables.
+HB_EMMC_SWAP_MB="${HB_EMMC_SWAP_MB:-2048}"
+HB_EMMC_SWAP_PATH="${HB_EMMC_SWAP_PATH:-/var/swap/hb_provision.swap}"
 
 ANSWER_DEFAULTS_GROUP=""
 ANSWER_DEFAULTS_DEVICE_TYPE=""
@@ -394,12 +400,13 @@ load_defaults() {
 
 usage() {
   cat >&2 <<'EOF'
-Usage: sudo ./provision_nvme.sh [--answers PATH]
+Usage: sudo ./provision_nvme.sh [--answers PATH] [--no-self-update]
 
 Provision an NVMe target using answers collected by provision_nvme_gui.py.
 
 Options:
   --answers PATH      JSON answers file (default: /tmp/hb_provision_answers.json)
+  --no-self-update    Do not git fetch/reset this repo to update the script (also: HB_PROVISION_NO_SELF_UPDATE=1)
   -h, --help          Show this help
 EOF
 }
@@ -414,6 +421,10 @@ parse_args() {
         ;;
       --answers=*)
         ANSWERS_FILE="${1#--answers=}"
+        shift
+        ;;
+      --no-self-update)
+        HB_PROVISION_NO_SELF_UPDATE=1
         shift
         ;;
       -h|--help)
@@ -813,6 +824,11 @@ update_self_if_possible() {
   local phase="$1"
   local script_path script_dir repo_root origin_head target_ref before after
 
+  if [[ "${HB_PROVISION_NO_SELF_UPDATE:-0}" == "1" ]]; then
+    log "Self-update: disabled for this run (--no-self-update or HB_PROVISION_NO_SELF_UPDATE=1)."
+    return 0
+  fi
+
   log "Self-update: checking for updates (${phase} phase)..."
 
   git_cmd() {
@@ -875,7 +891,8 @@ update_self_if_possible() {
       log "Provisioning script updated. Restarting setup now so the newest provisioning steps are used."
       log "Restarting with the same answers file: $ANSWERS_FILE"
       sleep 3
-      exec sudo HB_SELFUPDATED=1 HB_POST_UPDATE_ATTEMPTED=1 bash "$updated_script" --answers "$ANSWERS_FILE"
+      exec sudo env HB_SELFUPDATED=1 HB_POST_UPDATE_ATTEMPTED=1 HB_PROVISION_NO_SELF_UPDATE="${HB_PROVISION_NO_SELF_UPDATE:-0}" \
+        bash "$updated_script" --answers "$ANSWERS_FILE"
     else
       log "WARNING: Updated script not found at ${updated_script}; continuing."
     fi
@@ -1884,12 +1901,135 @@ unmount_chroot_env() {
   umount "${root_mnt}/dev" 2>/dev/null || true
 }
 
+# Swap file on the running system's root filesystem (typically eMMC during NVMe provisioning).
+# Stacks with zram; helps heavy host/chroot apt. Appends to /etc/fstab so swap persists after reboot.
+ensure_host_persistent_swap() {
+  local swap_mb="${HB_EMMC_SWAP_MB:-2048}"
+  local swap_path="${HB_EMMC_SWAP_PATH:-/var/swap/hb_provision.swap}"
+  local swap_dir free_kb need_kb fstab="/etc/fstab"
+
+  [[ "${swap_mb:-0}" -gt 0 ]] || return 0
+  need_cmd swapon
+  need_cmd mkswap
+
+  if swapon --show 2>/dev/null | awk -v p="$swap_path" 'NR > 1 && $1 == p { found = 1 } END { exit !found }'; then
+    log "Host swap file already active: $swap_path"
+    return 0
+  fi
+
+  swap_dir="$(dirname "$swap_path")"
+  mkdir -p "$swap_dir" || {
+    log "WARNING: Could not create directory for host swap: $swap_dir"
+    return 0
+  }
+
+  need_kb=$((swap_mb * 1024 + 256 * 1024))
+  free_kb="$(df -Pk "$swap_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [[ "${free_kb:-0}" -lt "$need_kb" ]]; then
+    log "WARNING: Not enough disk space under $swap_dir for ${swap_mb}MiB host swap (need ~$((need_kb / 1024))MiB free; have ${free_kb:-0}KiB)."
+    return 0
+  fi
+
+  if [[ ! -f "$swap_path" ]]; then
+    log "Creating ${swap_mb}MiB host swap file at $swap_path (rootfs; typically eMMC)..."
+    if ! fallocate -l "${swap_mb}M" "$swap_path" 2>/dev/null; then
+      dd if=/dev/zero of="$swap_path" bs=1M count="$swap_mb" status=none || {
+        log "WARNING: Failed to allocate host swap file $swap_path."
+        rm -f "$swap_path" 2>/dev/null || true
+        return 0
+      }
+    fi
+    chmod 600 "$swap_path" || true
+  fi
+
+  if ! mkswap "$swap_path" >/dev/null 2>&1; then
+    log "WARNING: mkswap failed for $swap_path."
+    return 0
+  fi
+  if ! swapon "$swap_path" 2>/dev/null; then
+    log "WARNING: swapon failed for $swap_path."
+    return 0
+  fi
+  log "Host swap file active: $swap_path (${swap_mb}MiB)."
+
+  if [[ -f "$fstab" ]] && ! awk -v p="$swap_path" '$1 == p { exit 0 } END { exit 1 }' "$fstab"; then
+    printf '%s none swap sw 0 0\n' "$swap_path" >>"$fstab"
+    log "Recorded host swap in /etc/fstab (persists after reboot)."
+  fi
+}
+
+# Temporary swap for the host during chroot apt: full-upgrade + labwc/wlroots can spike RAM
+# and the child apt/dpkg process is often SIGKILL'd by the OOM killer ("Killed" in logs).
+# Override with e.g. HB_CHROOT_APT_MIN_MEM_KB=999999 to always add swap, or HB_CHROOT_APT_SWAP_MB=0 to disable.
+HB_CHROOT_APT_MIN_MEM_KB="${HB_CHROOT_APT_MIN_MEM_KB:-1800000}"
+HB_CHROOT_APT_SWAP_MB="${HB_CHROOT_APT_SWAP_MB:-2048}"
+HB_CHROOT_APT_SWAP_PATH="${HB_CHROOT_APT_SWAP_PATH:-/var/tmp/hb_nvme_chroot_apt.swap}"
+HB_HOST_PROVISION_SWAP_ON=0
+
+host_provision_swap_deactivate() {
+  if [[ "${HB_HOST_PROVISION_SWAP_ON:-0}" != "1" ]]; then
+    return 0
+  fi
+  local p="${HB_CHROOT_APT_SWAP_PATH:-}"
+  [[ -n "$p" ]] || return 0
+  log "Removing temporary provisioning swap: $p"
+  swapoff "$p" 2>/dev/null || true
+  rm -f "$p" 2>/dev/null || true
+  HB_HOST_PROVISION_SWAP_ON=0
+}
+
+host_provision_swap_activate_if_needed() {
+  local min_kb="${HB_CHROOT_APT_MIN_MEM_KB:-1800000}"
+  local swap_mb="${HB_CHROOT_APT_SWAP_MB:-2048}"
+  local swap_path="${HB_CHROOT_APT_SWAP_PATH:-/var/tmp/hb_nvme_chroot_apt.swap}"
+  local avail_kb free_kb need_kb
+
+  [[ "${swap_mb:-0}" -gt 0 ]] || return 0
+  [[ -r /proc/meminfo ]] || return 0
+  avail_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
+  if [[ "${avail_kb:-0}" -ge "$min_kb" ]]; then
+    return 0
+  fi
+
+  if [[ -f "$swap_path" ]]; then
+    if swapon "$swap_path" 2>/dev/null; then
+      HB_HOST_PROVISION_SWAP_ON=1
+      log "Enabled existing provisioning swap $swap_path (MemAvailable ${avail_kb}KiB < ${min_kb}KiB)."
+      return 0
+    fi
+    rm -f "$swap_path" 2>/dev/null || true
+  fi
+
+  need_kb=$((swap_mb * 1024 + 512 * 1024))
+  free_kb="$(df -Pk "$(dirname "$swap_path")" 2>/dev/null | awk 'NR==2 {print $4}')"
+  if [[ "${free_kb:-0}" -lt "$need_kb" ]]; then
+    log "WARNING: Not enough free disk under $(dirname "$swap_path") for ${swap_mb}MiB swap (need ~$((need_kb / 1024))MiB; have ${free_kb:-0}KiB). Chroot apt may be killed on low-memory hosts."
+    return 0
+  fi
+
+  log "Host MemAvailable is ${avail_kb}KiB (below ${min_kb}KiB). Creating ${swap_mb}MiB swap at $swap_path for chroot apt..."
+  if ! fallocate -l "${swap_mb}M" "$swap_path" 2>/dev/null; then
+    dd if=/dev/zero of="$swap_path" bs=1M count="$swap_mb" status=none || {
+      log "WARNING: Failed to allocate swap file $swap_path."
+      return 0
+    }
+  fi
+  chmod 600 "$swap_path" || true
+  if ! mkswap "$swap_path" >/dev/null 2>&1 || ! swapon "$swap_path" 2>/dev/null; then
+    log "WARNING: Failed to mkswap/swapon $swap_path."
+    rm -f "$swap_path" 2>/dev/null || true
+    return 0
+  fi
+  HB_HOST_PROVISION_SWAP_ON=1
+  log "Temporary provisioning swap active."
+}
+
 configure_nvme_packages_and_services() {
   local root_mnt="$1"
   local locale="$2"
   log "Configuring packages/services in NVMe OS (apt upgrade, dev packages, disable bluetooth)..."
   mount_chroot_env "$root_mnt"
-  trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
+  trap 'host_provision_swap_deactivate; unmount_chroot_env "'"$root_mnt"'"' RETURN
   local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
 
   chroot_cmd() {
@@ -1897,8 +2037,12 @@ configure_nvme_packages_and_services() {
   }
 
   chroot_apt_get() {
-    run_with_apt_lock_retry "NVMe rootfs apt-get $*" chroot_cmd /usr/bin/apt-get "$@"
+    run_with_apt_lock_retry "NVMe rootfs apt-get $*" chroot_cmd /usr/bin/apt-get \
+      -o APT::Install-Recommends=false \
+      "$@"
   }
+
+  host_provision_swap_activate_if_needed
 
   if ! chroot_apt_get update \
     || ! chroot_apt_get -y full-upgrade \
@@ -1912,10 +2056,16 @@ configure_nvme_packages_and_services() {
       || die "Failed to run apt update/full-upgrade in NVMe rootfs."
   fi
 
+  # Install in batches to lower peak memory (wlroots/labwc unpack is heavy).
   chroot_apt_get install -y \
-    locales build-essential cmake libevdev-dev libpq-dev libcamera-apps screen git \
-    ca-certificates curl jq unzip wget cage labwc libtcl9.0 raspi-config lightdm seatd \
-    || die "Failed to install packages in NVMe rootfs."
+    locales ca-certificates curl jq unzip wget git screen \
+    || die "Failed to install base packages in NVMe rootfs."
+  chroot_apt_get install -y \
+    build-essential cmake libevdev-dev libpq-dev \
+    || die "Failed to install build packages in NVMe rootfs."
+  chroot_apt_get install -y \
+    libcamera-apps libtcl9.0 raspi-config lightdm seatd cage labwc \
+    || die "Failed to install desktop/kiosk packages in NVMe rootfs."
 
   if [[ -n "$locale" ]]; then
     if ! chroot_cmd /usr/sbin/locale-gen "$locale"; then
@@ -1931,6 +2081,7 @@ configure_nvme_packages_and_services() {
     SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" enable seatd.service || log "WARNING: Failed to enable seatd in NVMe rootfs."
   fi
 
+  host_provision_swap_deactivate
   unmount_chroot_env "$root_mnt"
   trap - RETURN
 }
@@ -2160,6 +2311,8 @@ main() {
   apply_answer_defaults_env
   load_defaults
   validate_answers
+
+  ensure_host_persistent_swap
 
   HB_SELFUPDATE_NO_INTERNET=0
   if ! update_self_if_possible "pre"; then
