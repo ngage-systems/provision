@@ -1855,7 +1855,7 @@ class ProvisioningWizard(tk.Tk):
         entry.bind("<Button-1>", lambda _event, widget=entry: self._show_touch_keyboard(widget), add="+")
         return var, entry
 
-    def _add_listbox(self, entries, selected_value=""):
+    def _add_listbox(self, entries, selected_value="", *, max_visible_rows=5):
         var = tk.StringVar(value=selected_value)
         list_frame = tk.Frame(self.content, bg=BG)
         list_frame.pack(fill="x", pady=5)
@@ -1871,7 +1871,7 @@ class ProvisioningWizard(tk.Tk):
             highlightthickness=2,
             highlightbackground=ENTRY_BG,
             highlightcolor=ACCENT,
-            height=min(5, max(1, len(entries))),
+            height=min(max_visible_rows, max(1, len(entries))),
             activestyle="none",
         )
         for item in entries:
@@ -2276,7 +2276,7 @@ class ProvisioningWizard(tk.Tk):
 
         if self.wifi_ssids:
             selected = self.answers.get("wifi_ssid", "")
-            self._ssid_list_var, listbox = self._add_listbox(self.wifi_ssids, selected)
+            self._ssid_list_var, listbox = self._add_listbox(self.wifi_ssids, selected, max_visible_rows=2)
             listbox.bind("<<ListboxSelect>>", self._on_ssid_list_select, add="+")
         else:
             self._add_label("No scanned Wi-Fi networks found. You can type the SSID manually.", fg=MUTED)
