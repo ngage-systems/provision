@@ -857,7 +857,7 @@ def hb_secret_agent(typed_psk):
                 pass
 
 
-def test_wifi_connection(ssid, password):
+def test_wifi_connection(ssid, password, *, hidden=False):
     if not ssid:
         return {"ok": True, "tested": False, "internet_reachable": False, "message": "Wi-Fi skipped."}
 
@@ -916,24 +916,25 @@ def test_wifi_connection(ssid, password):
             }
         created_connection = True
 
-        result = nmcli(
-            [
-                "-w",
-                "30",
-                "con",
-                "modify",
-                connection_name,
-                "connection.autoconnect",
-                "no",
-                "wifi-sec.key-mgmt",
-                "wpa-psk",
-                "wifi-sec.psk",
-                password,
-                "wifi-sec.psk-flags",
-                "0",
-            ],
-            timeout=35,
-        )
+        modify_args = [
+            "-w",
+            "30",
+            "con",
+            "modify",
+            connection_name,
+            "connection.autoconnect",
+            "no",
+            "wifi-sec.key-mgmt",
+            "wpa-psk",
+            "wifi-sec.psk",
+            password,
+            "wifi-sec.psk-flags",
+            "0",
+        ]
+        if hidden:
+            modify_args.extend(["wifi.hidden", "yes"])
+
+        result = nmcli(modify_args, timeout=35)
         if result.returncode != 0:
             return {
                 "ok": False,
@@ -1022,6 +1023,7 @@ class ProvisioningWizard(tk.Tk):
 
         self.answers = {
             "wifi_country": DEFAULT_WIFI_COUNTRY,
+            "wifi_hidden": False,
             "timezone": DEFAULT_TIMEZONE,
             "locale": DEFAULT_LOCALE,
             "screen_rotation": DEFAULT_SCREEN_ROTATION,
@@ -1094,13 +1096,15 @@ class ProvisioningWizard(tk.Tk):
 
         ssid = self.answers.get("wifi_ssid", "")
         password = self.answers.get("wifi_password", "")
+        hidden = bool(self.answers.get("wifi_hidden"))
         if (
             ssid
             and password
             and self.answers.get("wifi_tested") is True
             and self.answers.get("wifi_test_ssid") == ssid
+            and bool(self.answers.get("wifi_test_hidden")) == hidden
         ):
-            self._last_wifi_test_signature = (ssid, password)
+            self._last_wifi_test_signature = (ssid, password, hidden)
         print(f"Resume state: restored wizard at {payload['target_step']}.")
 
     def _current_resume_target_step_name(self):
@@ -2279,6 +2283,20 @@ class ProvisioningWizard(tk.Tk):
             self._ssid_list_var = tk.StringVar(value="")
 
         self._wifi_ssid_var, entry = self._add_entry(self.answers.get("wifi_ssid", ""))
+        self._wifi_hidden_var = tk.BooleanVar(value=bool(self.answers.get("wifi_hidden")))
+        hid_row = tk.Frame(self.content, bg=BG)
+        hid_row.pack(fill="x", pady=(8, 0))
+        tk.Checkbutton(
+            hid_row,
+            text="Hidden network (SSID not broadcast)",
+            variable=self._wifi_hidden_var,
+            bg=BG,
+            fg=FG,
+            selectcolor=ENTRY_BG,
+            activebackground=BG,
+            activeforeground=FG,
+            font=FONT_LABEL,
+        ).pack(anchor="w")
         entry.focus_set()
 
     def _on_ssid_list_select(self, _event):
@@ -2476,6 +2494,10 @@ class ProvisioningWizard(tk.Tk):
             ("Defaults", self.answers.get("defaults_section", "(skipped)")),
             ("Wi-Fi country", self.answers.get("wifi_country", "")),
             ("Wi-Fi SSID", self.answers.get("wifi_ssid", "(skipped)") or "(skipped)"),
+            (
+                "Wi-Fi hidden SSID",
+                "Yes" if self.answers.get("wifi_hidden") else "No",
+            ),
             ("Wi-Fi test", self._wifi_test_summary()),
             ("Accessory checks", self._accessory_check_summary()),
             ("Timezone", self.answers.get("timezone", "")),
@@ -2633,20 +2655,25 @@ class ProvisioningWizard(tk.Tk):
 
         elif step_name == "_step_wifi_ssid":
             value = self._wifi_ssid_var.get().strip()
+            hidden = bool(self._wifi_hidden_var.get())
             if "\n" in value or "\r" in value:
                 messagebox.showerror("Invalid", "Wi-Fi SSID cannot contain newline characters.")
                 return False
-            if value != self.answers.get("wifi_ssid"):
+            prev_hidden = bool(self.answers.get("wifi_hidden"))
+            if value != self.answers.get("wifi_ssid") or hidden != prev_hidden:
                 self._last_wifi_test_signature = None
                 self.answers.pop("wifi_tested", None)
                 self.answers.pop("wifi_test_ssid", None)
+                self.answers.pop("wifi_test_hidden", None)
                 self.answers.pop("wifi_test_passed", None)
                 self.answers.pop("wifi_continue_anyway", None)
                 self.answers.pop("wifi_internet_reachable", None)
                 self.answers.pop("wifi_test_message", None)
             self.answers["wifi_ssid"] = value
+            self.answers["wifi_hidden"] = hidden if value else False
             if not value:
                 self.answers["wifi_password"] = ""
+                self.answers["wifi_hidden"] = False
                 self.answers["wifi_tested"] = False
                 self.answers["wifi_test_passed"] = False
                 self.answers["wifi_continue_anyway"] = False
@@ -2670,10 +2697,12 @@ class ProvisioningWizard(tk.Tk):
                 return False
             self.answers["wifi_password"] = value
             ssid = self.answers.get("wifi_ssid", "")
-            test_signature = (ssid, value)
+            hidden_now = bool(self.answers.get("wifi_hidden"))
+            test_signature = (ssid, value, hidden_now)
             already_tested = (
                 self.answers.get("wifi_tested") is True
                 and self.answers.get("wifi_test_ssid") == ssid
+                and bool(self.answers.get("wifi_test_hidden")) == hidden_now
                 and self._last_wifi_test_signature == test_signature
             )
             if not already_tested:
@@ -2684,7 +2713,7 @@ class ProvisioningWizard(tk.Tk):
                         "The current Wi-Fi network will be restored afterwards.",
                     )
                     try:
-                        result = test_wifi_connection(ssid, value)
+                        result = test_wifi_connection(ssid, value, hidden=hidden_now)
                     finally:
                         dialog.grab_release()
                         dialog.destroy()
@@ -2692,6 +2721,7 @@ class ProvisioningWizard(tk.Tk):
 
                     self.answers["wifi_tested"] = result["tested"]
                     self.answers["wifi_test_ssid"] = ssid
+                    self.answers["wifi_test_hidden"] = hidden_now
                     self.answers["wifi_test_passed"] = result["ok"]
                     self.answers["wifi_continue_anyway"] = False
                     self.answers["wifi_internet_reachable"] = result["internet_reachable"]

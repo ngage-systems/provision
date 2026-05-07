@@ -40,6 +40,7 @@ ANSWER_DEFAULTS_SECTION=""
 ANSWER_WIFI_COUNTRY=""
 ANSWER_WIFI_SSID=""
 ANSWER_WIFI_PASSWORD=""
+ANSWER_WIFI_HIDDEN=""
 ANSWER_TIMEZONE=""
 ANSWER_LOCALE=""
 ANSWER_SCREEN_PIXELS_WIDTH=""
@@ -471,6 +472,7 @@ keys = {
     "ANSWER_WIFI_COUNTRY": "wifi_country",
     "ANSWER_WIFI_SSID": "wifi_ssid",
     "ANSWER_WIFI_PASSWORD": "wifi_password",
+    "ANSWER_WIFI_HIDDEN": "wifi_hidden",
     "ANSWER_TIMEZONE": "timezone",
     "ANSWER_LOCALE": "locale",
     "ANSWER_SCREEN_PIXELS_WIDTH": "screen_pixels_width",
@@ -1696,14 +1698,15 @@ write_headless_config() {
   local password="$4"
   local wifi_ssid="$5"
   local wifi_pass="$6"
-  local hostname="$7"
-  local wifi_country="$8"
-  local timezone="$9"
-  local locale="${10}"
-  local screen_w="${11}"
-  local screen_h="${12}"
-  local screen_r="${13}"
-  local screen_rot="${14}"
+  local wifi_hidden_raw="$7"
+  local hostname="$8"
+  local wifi_country="$9"
+  local timezone="${10}"
+  local locale="${11}"
+  local screen_w="${12}"
+  local screen_h="${13}"
+  local screen_r="${14}"
+  local screen_rot="${15}"
 
   log "Configuring NVMe OS (SSH/user/Wi-Fi)..."
 
@@ -1788,7 +1791,14 @@ write_headless_config() {
     [[ -n "$nm_file" ]] || nm_file="wifi"
     nm_file="${nm_dir}/${nm_file}.nmconnection"
 
-    cat > "$nm_file" <<EOF
+    local wifi_hidden_lc hidden_line=""
+    wifi_hidden_lc="$(printf '%s' "${wifi_hidden_raw:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$wifi_hidden_lc" == "true" || "$wifi_hidden_lc" == "yes" || "$wifi_hidden_lc" == "1" ]]; then
+      hidden_line="hidden=true"
+    fi
+
+    {
+      cat <<EOF
 [connection]
 id=${wifi_ssid}
 type=wifi
@@ -1797,6 +1807,11 @@ autoconnect=true
 [wifi]
 mode=infrastructure
 ssid=${wifi_ssid}
+EOF
+      if [[ -n "$hidden_line" ]]; then
+        printf '%s\n' "$hidden_line"
+      fi
+      cat <<EOF
 
 [wifi-security]
 key-mgmt=wpa-psk
@@ -1808,6 +1823,7 @@ method=auto
 [ipv6]
 method=auto
 EOF
+    } > "$nm_file"
 
     chmod 600 "$nm_file"
     chown root:root "$nm_file"
@@ -2385,7 +2401,7 @@ main() {
   fi
 
   local wifi_country timezone locale screen_w screen_h screen_r screen_rot
-  local wifi_ssid="" wifi_pass=""
+  local wifi_ssid="" wifi_pass="" wifi_hidden=""
   local hostname username password
   local nvme_dev
   local monitor_width monitor_height monitor_distance
@@ -2393,6 +2409,7 @@ main() {
   wifi_country="$ANSWER_WIFI_COUNTRY"
   wifi_ssid="$ANSWER_WIFI_SSID"
   wifi_pass="$ANSWER_WIFI_PASSWORD"
+  wifi_hidden="$ANSWER_WIFI_HIDDEN"
 
   if ! wait_for_internet 30 3; then
     die "No internet connectivity after checking $(internet_probe_targets_text). Wi-Fi may be connected but blocked by a captive portal, firewall, or a route/DNS issue."
@@ -2456,7 +2473,7 @@ main() {
   MONITOR_HEIGHT_CM="$monitor_height"
   MONITOR_DISTANCE_CM="$monitor_distance"
 
-  write_headless_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$username" "$password" "$wifi_ssid" "$wifi_pass" "$hostname" "$wifi_country" "$timezone" "$locale" "$screen_w" "$screen_h" "$screen_r" "$screen_rot"
+  write_headless_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$username" "$password" "$wifi_ssid" "$wifi_pass" "$wifi_hidden" "$hostname" "$wifi_country" "$timezone" "$locale" "$screen_w" "$screen_h" "$screen_r" "$screen_rot"
   ensure_user_exists_root "$HB_ROOT_MNT" "$username" "$password"
 
   configure_nvme_packages_and_services "$HB_ROOT_MNT" "$locale"
