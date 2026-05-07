@@ -2276,7 +2276,7 @@ class ProvisioningWizard(tk.Tk):
 
         if self.wifi_ssids:
             selected = self.answers.get("wifi_ssid", "")
-            self._ssid_list_var, listbox = self._add_listbox(self.wifi_ssids, selected, max_visible_rows=2)
+            self._ssid_list_var, listbox = self._add_listbox(self.wifi_ssids, selected, max_visible_rows=3)
             listbox.bind("<<ListboxSelect>>", self._on_ssid_list_select, add="+")
         else:
             self._add_label("No scanned Wi-Fi networks found. You can type the SSID manually.", fg=MUTED)
