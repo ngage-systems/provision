@@ -788,6 +788,16 @@ def safe_connection_name(ssid):
     return val.strip()
 
 
+def _strip_nmcli_secret_value(raw):
+    """Normalize a secret string from nmcli -g or tabular output."""
+    if raw is None:
+        return ""
+    val = raw.strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+        val = val[1:-1]
+    return val.strip()
+
+
 def read_connection_wifi_psk(connection_name):
     """Read the WPA PSK NetworkManager has for this connection (best-effort; needs nmcli -s)."""
     for field in ("wifi-sec.psk", "802-11-wireless-security.psk"):
