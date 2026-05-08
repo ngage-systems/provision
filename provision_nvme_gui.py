@@ -14,7 +14,6 @@ provision_nvme.sh).
 import argparse
 import configparser
 from contextlib import contextmanager
-import hashlib
 import json
 import math
 import os
@@ -29,7 +28,6 @@ import sys
 import threading
 import time
 import tkinter as tk
-import unicodedata
 from tkinter import messagebox
 import uuid
 
@@ -819,39 +817,6 @@ def read_connection_wifi_psk(connection_name):
             continue
         return val
     return None
-
-
-def wifi_psk_matches_nm(actual, typed, ssid=None):
-    """True if NM-reported secret matches what the user typed (plaintext, PMK hex, or WPA2 PMK derivation)."""
-    if typed is None:
-        return False
-    if actual is None:
-        return False
-    t = unicodedata.normalize("NFC", (typed or "").strip())
-    a = unicodedata.normalize("NFC", (actual or "").strip())
-    if not t:
-        return False
-    if a == t:
-        return True
-    if len(a) == 64 and len(t) == 64:
-        if re.fullmatch(r"(?i)[0-9a-f]{64}", a) and re.fullmatch(r"(?i)[0-9a-f]{64}", t):
-            return a.lower() == t.lower()
-    # NetworkManager sometimes exposes WPA2 PMK as 64 hex chars while the user typed an ASCII passphrase.
-    if ssid and len(a) == 64 and re.fullmatch(r"(?i)[0-9a-f]{64}", a) and len(t) != 64:
-        ssid_clean = unicodedata.normalize("NFC", (ssid or "").strip())
-        if ssid_clean:
-            try:
-                pmk_hex = hashlib.pbkdf2_hmac(
-                    "sha1",
-                    t.encode("utf-8"),
-                    ssid_clean.encode("utf-8"),
-                    4096,
-                    32,
-                ).hex()
-            except (UnicodeEncodeError, TypeError):
-                return False
-            return pmk_hex.lower() == a.lower()
-    return False
 
 
 NM_AGENT_IFACE = "org.freedesktop.NetworkManager.SecretAgent"
@@ -2279,56 +2244,6 @@ class ProvisioningWizard(tk.Tk):
         dialog.destroy()
         return choice
 
-    def _ask_wifi_verify_action(self):
-        dialog = tk.Toplevel(self)
-        dialog.title("Re-enter Wi-Fi password")
-        dialog.configure(bg=BG)
-        dialog.minsize(400, 200)
-
-        sw = max(480, self.winfo_screenwidth())
-        wrap_px = max(280, min(760, sw - 80))
-
-        tk.Label(
-            dialog,
-            text="Re-enter Wi-Fi password",
-            bg=BG,
-            fg=ERROR,
-            font=FONT_TITLE,
-        ).pack(anchor="w", padx=30, pady=(18, 8))
-        tk.Label(
-            dialog,
-            text=(
-                "The password that worked isn't the one you typed here. "
-                "Only the password typed in this window is saved to the new device, "
-                "so the password must be entered correctly here."
-            ),
-            bg=BG,
-            fg=FG,
-            font=FONT_LABEL,
-            justify="left",
-            wraplength=wrap_px,
-        ).pack(anchor="w", padx=30, pady=(0, 12))
-
-        action = tk.StringVar(value="")
-        buttons = tk.Frame(dialog, bg=BG)
-        buttons.pack(side="bottom", fill="x", padx=30, pady=(0, 20))
-        retry_button = self._make_button(buttons, "Re-enter Password", lambda: action.set("retry"), primary=True)
-        retry_button.pack(side="left")
-        self._make_button(buttons, "Edit Wi-Fi", lambda: action.set("edit")).pack(side="left", padx=15)
-
-        self._fit_modal_to_screen(dialog, max_width=min(900, sw))
-        self._finalize_modal(
-            dialog,
-            focus_widget=retry_button,
-            parent=self,
-            geometry=None,
-        )
-        dialog.wait_variable(action)
-        choice = action.get()
-        dialog.grab_release()
-        dialog.destroy()
-        return choice
-
     def _maybe_self_update(self, phase):
         if os.environ.get("HB_PROVISION_NO_SELF_UPDATE", "0").strip() == "1":
             print(
@@ -3036,18 +2951,22 @@ class ProvisioningWizard(tk.Tk):
                 self.answers["wifi_test_message"] = result["message"]
 
                 if result["ok"]:
-                    actual_password = result.get("actual_password")
-                    if not wifi_psk_matches_nm(actual_password, value, ssid=ssid):
-                        self.answers["wifi_test_passed"] = False
-                        self._last_wifi_test_signature = None
-                        verify_action = self._ask_wifi_verify_action()
-                        if verify_action == "edit":
-                            self.step_index = self.steps.index(self._step_wifi_ssid)
-                            self._render_current_step()
-                        return False
+                    # Do not gate on NM secret readback. Association already used the passphrase from
+                    # hb_secret_agent; nmcli may expose WPA2 PMK hex, WPA3 blobs, masking, etc., so a
+                    # string compare falsely fails and wedges this step despite a successful connect.
 
                     wifi_probe_ok = bool(result.get("internet_reachable"))
-                    post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
+                    try:
+                        post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
+                    except Exception as exc:
+                        print(f"Connectivity check (post-wifi, default route): {exc}")
+                        messagebox.showerror(
+                            "Connectivity check",
+                            f"Unexpected error while checking network reachability:\n{exc}\n\n"
+                            "You can retry, or fix the issue from a terminal.",
+                            parent=self,
+                        )
+                        continue
                     post_probe_ok = connectivity_report_all_ok(post_rows)
                     failure_rows = list(result.get("connectivity_report") or [])
                     if wifi_probe_ok and not post_probe_ok:
