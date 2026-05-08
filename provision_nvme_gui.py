@@ -1360,13 +1360,19 @@ class ProvisioningWizard(tk.Tk):
         try:
             dialog.wait_visibility()
         except tk.TclError:
-            return
-        dialog.lift()
-        dialog.grab_set()
+            pass
+        try:
+            dialog.lift()
+            dialog.grab_set()
+        except tk.TclError:
+            pass
         if focus_widget is not None and focus_widget.winfo_exists():
             focus_widget.focus_force()
         else:
-            dialog.focus_force()
+            try:
+                dialog.focus_force()
+            except tk.TclError:
+                pass
 
     def _fit_modal_to_screen(self, dialog, max_width=900, min_height=200):
         """Size and center a modal so all packed content fits (avoids clipping buttons on small displays)."""
@@ -2058,8 +2064,16 @@ class ProvisioningWizard(tk.Tk):
             icon="warning",
         )
 
-    def _connectivity_checklist_modal(self, rows):
-        """Show per-check results; return 'retry' | 'back' | 'continue'."""
+    def _connectivity_checklist_modal(self, rows, *, allow_redo_wifi=False):
+        """Show per-check results.
+
+        Returns one of retry | back | continue, or redo_wifi when allow_redo_wifi is True.
+        Window close acts as Back (never implies a silent full Wi‑Fi retest).
+        """
+        valid_choices = {"retry", "back", "continue"}
+        if allow_redo_wifi:
+            valid_choices = valid_choices | {"redo_wifi"}
+
         dialog = tk.Toplevel(self)
         dialog.title("Connectivity check")
         dialog.configure(bg=BG)
@@ -2087,11 +2101,19 @@ class ProvisioningWizard(tk.Tk):
 
         action = tk.StringVar(value="")
 
+        dialog.protocol("WM_DELETE_WINDOW", lambda: action.set("back"))
+
         buttons = tk.Frame(dialog, bg=BG)
         buttons.pack(side="bottom", fill="x", padx=30, pady=(0, 20))
-        retry_button = self._make_button(buttons, "Retry", lambda: action.set("retry"), primary=True)
+        retry_button = self._make_button(
+            buttons, "Retry checks", lambda: action.set("retry"), primary=True
+        )
         retry_button.pack(side="left")
         self._make_button(buttons, "Back", lambda: action.set("back")).pack(side="left", padx=15)
+        if allow_redo_wifi:
+            self._make_button(buttons, "Test Wi‑Fi again", lambda: action.set("redo_wifi")).pack(
+                side="left", padx=15
+            )
         self._make_button(buttons, "Continue anyway", lambda: action.set("continue")).pack(side="right")
 
         body_lines = summarize_connectivity_rows(rows)
@@ -2136,7 +2158,7 @@ class ProvisioningWizard(tk.Tk):
         dialog.grab_release()
         dialog.destroy()
         self.focus_force()
-        return choice or "retry"
+        return choice if choice in valid_choices else "back"
 
     def _run_connectivity_gate(self, bind_iface=None):
         """Prompt until checks pass or user bypasses (Ethernet / default route path)."""
@@ -2955,71 +2977,81 @@ class ProvisioningWizard(tk.Tk):
                     # hb_secret_agent; nmcli may expose WPA2 PMK hex, WPA3 blobs, masking, etc., so a
                     # string compare falsely fails and wedges this step despite a successful connect.
 
-                    wifi_probe_ok = bool(result.get("internet_reachable"))
-                    try:
-                        post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
-                    except Exception as exc:
-                        print(f"Connectivity check (post-wifi, default route): {exc}")
-                        messagebox.showerror(
-                            "Connectivity check",
-                            f"Unexpected error while checking network reachability:\n{exc}\n\n"
-                            "You can retry, or fix the issue from a terminal.",
-                            parent=self,
-                        )
-                        continue
-                    post_probe_ok = connectivity_report_all_ok(post_rows)
-                    failure_rows = list(result.get("connectivity_report") or [])
-                    if wifi_probe_ok and not post_probe_ok:
-                        failure_rows = post_rows
+                    redo_full_wifi = False
+                    while True:
+                        wifi_probe_ok = bool(result.get("internet_reachable"))
+                        try:
+                            post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
+                        except Exception as exc:
+                            print(f"Connectivity check (post-wifi, default route): {exc}")
+                            messagebox.showerror(
+                                "Connectivity check",
+                                f"Unexpected error while checking network reachability:\n{exc}\n\n"
+                                "Use Retry checks to try again, or fix the issue from a terminal.",
+                                parent=self,
+                            )
+                            continue
 
-                    if wifi_probe_ok and post_probe_ok:
-                        self.answers["connectivity_continue_anyway"] = False
-                        self.answers.pop("connectivity_checks_last_report", None)
-                        self.answers["wifi_internet_reachable"] = True
-                        self._last_wifi_test_signature = test_signature
-                        self._show_timed_message(
-                            "Success!",
-                            "Required sites and downloads are reachable.",
-                            milliseconds=2000,
-                        )
-                        if self._self_update_retry_needed:
-                            self._maybe_self_update("post-wifi")
-                        break
+                        post_probe_ok = connectivity_report_all_ok(post_rows)
+                        failure_rows = list(result.get("connectivity_report") or [])
+                        if wifi_probe_ok and not post_probe_ok:
+                            failure_rows = post_rows
 
-                    connectivity_out = None
-                    while connectivity_out is None:
+                        if wifi_probe_ok and post_probe_ok:
+                            self.answers["connectivity_continue_anyway"] = False
+                            self.answers.pop("connectivity_checks_last_report", None)
+                            self.answers["wifi_internet_reachable"] = True
+                            self._last_wifi_test_signature = test_signature
+                            self._show_timed_message(
+                                "Success!",
+                                "Required sites and downloads are reachable.",
+                                milliseconds=2000,
+                            )
+                            if self._self_update_retry_needed:
+                                self._maybe_self_update("post-wifi")
+                            break
+
                         self.answers["connectivity_checks_last_report"] = [dict(r) for r in failure_rows]
-                        choice = self._connectivity_checklist_modal(failure_rows)
+                        choice = self._connectivity_checklist_modal(
+                            failure_rows, allow_redo_wifi=True
+                        )
                         if choice == "retry":
-                            connectivity_out = "retry_wifi"
-                        elif choice == "back":
+                            continue
+                        if choice == "redo_wifi":
+                            redo_full_wifi = True
+                            break
+                        if choice == "back":
                             self.step_index = self.steps.index(self._step_wifi_ssid)
                             self._render_current_step()
                             return False
-                        elif choice == "continue":
+                        if choice == "continue":
                             if self._confirm_connectivity_bypass():
                                 self.answers["connectivity_continue_anyway"] = True
                                 self.answers["wifi_internet_reachable"] = False
                                 self.answers["wifi_test_passed"] = True
                                 self._last_wifi_test_signature = test_signature
-                                connectivity_out = "done"
-                    if connectivity_out == "retry_wifi":
+                                break
+                            continue
+
+                    if redo_full_wifi:
                         continue
+
                     break
 
-                self._last_wifi_test_signature = None
-                action = self._ask_wifi_failure_action(result["message"])
-                if action == "retry":
-                    continue
-                if action == "edit":
-                    self.step_index = self.steps.index(self._step_wifi_ssid)
-                    self._render_current_step()
-                    return False
+                if not result["ok"]:
+                    self._last_wifi_test_signature = None
+                    action = self._ask_wifi_failure_action(result["message"])
+                    if action == "retry":
+                        continue
+                    if action == "edit":
+                        self.step_index = self.steps.index(self._step_wifi_ssid)
+                        self._render_current_step()
+                        return False
 
-                self.answers["wifi_continue_anyway"] = True
-                self.answers["wifi_test_passed"] = False
-                self._last_wifi_test_signature = test_signature
-                break
+                    self.answers["wifi_continue_anyway"] = True
+                    self.answers["wifi_test_passed"] = False
+                    self._last_wifi_test_signature = test_signature
+                    break
 
             return True
 
