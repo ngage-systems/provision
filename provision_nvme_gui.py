@@ -14,6 +14,7 @@ provision_nvme.sh).
 import argparse
 import configparser
 from contextlib import contextmanager
+import hashlib
 import json
 import math
 import os
@@ -28,6 +29,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import unicodedata
 from tkinter import messagebox
 import uuid
 
@@ -819,19 +821,36 @@ def read_connection_wifi_psk(connection_name):
     return None
 
 
-def wifi_psk_matches_nm(actual, typed):
-    """True if NM-reported PSK matches what the user entered (after normalisation)."""
+def wifi_psk_matches_nm(actual, typed, ssid=None):
+    """True if NM-reported secret matches what the user typed (plaintext, PMK hex, or WPA2 PMK derivation)."""
     if typed is None:
         return False
     if actual is None:
         return False
-    a = (actual or "").strip()
-    t = (typed or "").strip()
+    t = unicodedata.normalize("NFC", (typed or "").strip())
+    a = unicodedata.normalize("NFC", (actual or "").strip())
+    if not t:
+        return False
     if a == t:
         return True
     if len(a) == 64 and len(t) == 64:
         if re.fullmatch(r"(?i)[0-9a-f]{64}", a) and re.fullmatch(r"(?i)[0-9a-f]{64}", t):
             return a.lower() == t.lower()
+    # NetworkManager sometimes exposes WPA2 PMK as 64 hex chars while the user typed an ASCII passphrase.
+    if ssid and len(a) == 64 and re.fullmatch(r"(?i)[0-9a-f]{64}", a) and len(t) != 64:
+        ssid_clean = unicodedata.normalize("NFC", (ssid or "").strip())
+        if ssid_clean:
+            try:
+                pmk_hex = hashlib.pbkdf2_hmac(
+                    "sha1",
+                    t.encode("utf-8"),
+                    ssid_clean.encode("utf-8"),
+                    4096,
+                    32,
+                ).hex()
+            except (UnicodeEncodeError, TypeError):
+                return False
+            return pmk_hex.lower() == a.lower()
     return False
 
 
@@ -3018,7 +3037,7 @@ class ProvisioningWizard(tk.Tk):
 
                 if result["ok"]:
                     actual_password = result.get("actual_password")
-                    if not wifi_psk_matches_nm(actual_password, value):
+                    if not wifi_psk_matches_nm(actual_password, value, ssid=ssid):
                         self.answers["wifi_test_passed"] = False
                         self._last_wifi_test_signature = None
                         verify_action = self._ask_wifi_verify_action()
