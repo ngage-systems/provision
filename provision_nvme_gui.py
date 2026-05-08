@@ -779,10 +779,10 @@ def wait_for_ipv4(iface, timeout_s=90):
 
 
 def safe_connection_name(ssid):
-    """Normalize a secret string from nmcli -g or tabular output."""
-    if raw is None:
+    """Strip SSID for use as nmcli Wi-Fi profile name fragment."""
+    if ssid is None:
         return ""
-    val = raw.strip()
+    val = str(ssid).strip()
     if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
         val = val[1:-1]
     return val.strip()
