@@ -1150,7 +1150,6 @@ class ProvisioningWizard(tk.Tk):
         self._keyboard_shift = False
         self._keyboard_rows_frame = None
         self._last_wifi_test_signature = None
-        self._critical_dns_warned = False
 
         self.answers = {
             "wifi_country": DEFAULT_WIFI_COUNTRY,
@@ -2861,10 +2860,6 @@ class ProvisioningWizard(tk.Tk):
             self.answers["defaults_device_type"] = device_type
             self.answers["defaults_section"] = section
             self._apply_defaults_section(section)
-            if not self._critical_dns_warned:
-                self._critical_dns_warned = True
-                rh, _rp = self._registry_probe_target()
-                warn_critical_dns_if_needed(parent=self, registry_hostname=rh)
 
         elif step_name == "_step_wifi_country":
             value = self._wifi_country_var.get().strip().upper() or DEFAULT_WIFI_COUNTRY
@@ -2977,109 +2972,118 @@ class ProvisioningWizard(tk.Tk):
                 and bool(self.answers.get("wifi_test_hidden")) == hidden_now
                 and self._last_wifi_test_signature == test_signature
             )
-            if not already_tested:
-                reg_h, reg_p = self._registry_probe_target()
-                busy_phase1 = (
-                    "Connecting briefly to verify the password.\n"
-                    "The current Wi-Fi network will be restored afterwards."
-                )
-                busy_phase2 = (
-                    "Checking required sites and downloads over this Wi‑Fi:\n\n"
-                    "• Mesh / registry host\n"
-                    "• Raspberry Pi OS image downloads\n"
-                    "• GitHub (clone / updates)\n"
-                    "• Debian and Raspberry Pi mirrors (DNS + TCP)\n\n"
-                    "Please wait…"
-                )
-                while True:
-                    dialog, body = self._show_busy_dialog("Testing Wi-Fi", busy_phase1)
+            if already_tested:
+                return True
+            reg_h, reg_p = self._registry_probe_target()
+            busy_phase1 = (
+                "Connecting briefly to verify the password.\n"
+                "The current Wi-Fi network will be restored afterwards."
+            )
+            busy_phase2 = (
+                "Checking required sites and downloads over this Wi‑Fi:\n\n"
+                "• Mesh / registry host\n"
+                "• Raspberry Pi OS image downloads\n"
+                "• GitHub (clone / updates)\n"
+                "• Debian and Raspberry Pi mirrors (DNS + TCP)\n\n"
+                "Please wait…"
+            )
+            while True:
+                dialog, body = self._show_busy_dialog("Testing Wi-Fi", busy_phase1)
 
-                    def _on_connected(_iface):
-                        body.config(text=busy_phase2)
-                        dialog.update_idletasks()
+                def _on_connected(_iface):
+                    body.config(text=busy_phase2)
+                    dialog.update_idletasks()
 
-                    try:
-                        result = test_wifi_connection(
-                            ssid,
-                            value,
-                            hidden=hidden_now,
-                            registry_host=reg_h,
-                            registry_port=reg_p,
-                            on_connected=_on_connected,
+                try:
+                    result = test_wifi_connection(
+                        ssid,
+                        value,
+                        hidden=hidden_now,
+                        registry_host=reg_h,
+                        registry_port=reg_p,
+                        on_connected=_on_connected,
+                    )
+                finally:
+                    dialog.grab_release()
+                    dialog.destroy()
+                    self.update_idletasks()
+
+                self.answers["wifi_tested"] = result["tested"]
+                self.answers["wifi_test_ssid"] = ssid
+                self.answers["wifi_test_hidden"] = hidden_now
+                self.answers["wifi_test_passed"] = result["ok"]
+                self.answers["wifi_continue_anyway"] = False
+                self.answers["wifi_internet_reachable"] = result["internet_reachable"]
+                self.answers["wifi_test_message"] = result["message"]
+
+                if result["ok"]:
+                    actual_password = result.get("actual_password")
+                    if not wifi_psk_matches_nm(actual_password, value):
+                        self.answers["wifi_test_passed"] = False
+                        self._last_wifi_test_signature = None
+                        verify_action = self._ask_wifi_verify_action()
+                        if verify_action == "edit":
+                            self.step_index = self.steps.index(self._step_wifi_ssid)
+                            self._render_current_step()
+                        return False
+
+                    wifi_probe_ok = bool(result.get("internet_reachable"))
+                    post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
+                    post_probe_ok = connectivity_report_all_ok(post_rows)
+                    failure_rows = list(result.get("connectivity_report") or [])
+                    if wifi_probe_ok and not post_probe_ok:
+                        failure_rows = post_rows
+
+                    if wifi_probe_ok and post_probe_ok:
+                        self.answers["connectivity_continue_anyway"] = False
+                        self.answers.pop("connectivity_checks_last_report", None)
+                        self.answers["wifi_internet_reachable"] = True
+                        self._last_wifi_test_signature = test_signature
+                        self._show_timed_message(
+                            "Success!",
+                            "Required sites and downloads are reachable.",
+                            milliseconds=2000,
                         )
-                    finally:
-                        dialog.grab_release()
-                        dialog.destroy()
-                        self.update_idletasks()
+                        if self._self_update_retry_needed:
+                            self._maybe_self_update("post-wifi")
+                        break
 
-                    self.answers["wifi_tested"] = result["tested"]
-                    self.answers["wifi_test_ssid"] = ssid
-                    self.answers["wifi_test_hidden"] = hidden_now
-                    self.answers["wifi_test_passed"] = result["ok"]
-                    self.answers["wifi_continue_anyway"] = False
-                    self.answers["wifi_internet_reachable"] = result["internet_reachable"]
-                    self.answers["wifi_test_message"] = result["message"]
-
-                    if result["ok"]:
-                        actual_password = result.get("actual_password")
-                        if not wifi_psk_matches_nm(actual_password, value):
-                            self.answers["wifi_test_passed"] = False
-                            self._last_wifi_test_signature = None
-                            verify_action = self._ask_wifi_verify_action()
-                            if verify_action == "edit":
-                                self.step_index = self.steps.index(self._step_wifi_ssid)
-                                self._render_current_step()
-                            return False
-
-                        wifi_probe_ok = bool(result.get("internet_reachable"))
-                        post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
-                        post_probe_ok = connectivity_report_all_ok(post_rows)
-                        failure_rows = list(result.get("connectivity_report") or [])
-                        if wifi_probe_ok and not post_probe_ok:
-                            failure_rows = post_rows
-
-                        if wifi_probe_ok and post_probe_ok:
-                            self.answers["connectivity_continue_anyway"] = False
-                            self.answers.pop("connectivity_checks_last_report", None)
-                            self.answers["wifi_internet_reachable"] = True
-                            self._last_wifi_test_signature = test_signature
-                            self._show_timed_message(
-                                "Success!",
-                                "Required sites and downloads are reachable.",
-                                milliseconds=2000,
-                            )
-                            if self._self_update_retry_needed:
-                                self._maybe_self_update("post-wifi")
-                            break
-
+                    connectivity_out = None
+                    while connectivity_out is None:
                         self.answers["connectivity_checks_last_report"] = [dict(r) for r in failure_rows]
                         choice = self._connectivity_checklist_modal(failure_rows)
                         if choice == "retry":
-                            continue
-                        if choice == "back":
+                            connectivity_out = "retry_wifi"
+                        elif choice == "back":
                             self.step_index = self.steps.index(self._step_wifi_ssid)
                             self._render_current_step()
                             return False
-                        if choice == "continue" and self._confirm_connectivity_bypass():
-                            self.answers["connectivity_continue_anyway"] = True
-                            self.answers["wifi_internet_reachable"] = False
-                            self._last_wifi_test_signature = test_signature
-                            break
+                        elif choice == "continue":
+                            if self._confirm_connectivity_bypass():
+                                self.answers["connectivity_continue_anyway"] = True
+                                self.answers["wifi_internet_reachable"] = False
+                                self.answers["wifi_test_passed"] = True
+                                self._last_wifi_test_signature = test_signature
+                                connectivity_out = "done"
+                    if connectivity_out == "retry_wifi":
                         continue
-
-                    self._last_wifi_test_signature = None
-                    action = self._ask_wifi_failure_action(result["message"])
-                    if action == "retry":
-                        continue
-                    if action == "edit":
-                        self.step_index = self.steps.index(self._step_wifi_ssid)
-                        self._render_current_step()
-                        return False
-
-                    self.answers["wifi_continue_anyway"] = True
-                    self.answers["wifi_test_passed"] = False
-                    self._last_wifi_test_signature = test_signature
                     break
+
+                self._last_wifi_test_signature = None
+                action = self._ask_wifi_failure_action(result["message"])
+                if action == "retry":
+                    continue
+                if action == "edit":
+                    self.step_index = self.steps.index(self._step_wifi_ssid)
+                    self._render_current_step()
+                    return False
+
+                self.answers["wifi_continue_anyway"] = True
+                self.answers["wifi_test_passed"] = False
+                self._last_wifi_test_signature = test_signature
+                break
+
+            return True
 
         elif step_name == "_step_hostname":
             value = self._hostname_var.get().strip().lower()
