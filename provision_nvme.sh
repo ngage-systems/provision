@@ -56,6 +56,7 @@ ANSWER_MONITOR_DISTANCE_CM=""
 ANSWER_CONFIRM_ERASE=""
 ANSWER_NVME_DEVICE=""
 ANSWER_ALLOW_POSSIBLE_SD=""
+ANSWER_CONNECTIVITY_CONTINUE_ANYWAY=""
 ANSWER_ACCESSORY_CHECKS_JSON=""
 
 DEFAULTS_FILE=""
@@ -488,6 +489,7 @@ keys = {
     "ANSWER_CONFIRM_ERASE": "confirm_erase",
     "ANSWER_NVME_DEVICE": "nvme_device",
     "ANSWER_ALLOW_POSSIBLE_SD": "allow_possible_sd",
+    "ANSWER_CONNECTIVITY_CONTINUE_ANYWAY": "connectivity_continue_anyway",
 }
 
 for shell_name, json_name in keys.items():
@@ -611,6 +613,10 @@ validate_answers() {
   [[ "$ANSWER_CONFIRM_ERASE" == "ERASE" ]] || die "Missing destructive confirmation. Expected confirm_erase to equal ERASE."
   if [[ -n "$ANSWER_ALLOW_POSSIBLE_SD" ]]; then
     [[ "$ANSWER_ALLOW_POSSIBLE_SD" == "YES" || "$ANSWER_ALLOW_POSSIBLE_SD" == "true" ]] || die "allow_possible_sd must be YES or true when provided."
+  fi
+  if [[ -n "$ANSWER_CONNECTIVITY_CONTINUE_ANYWAY" ]]; then
+    [[ "$ANSWER_CONNECTIVITY_CONTINUE_ANYWAY" =~ ^(true|false|YES|NO)$ ]] \
+      || die "connectivity_continue_anyway must be true/false or YES/NO when provided."
   fi
 }
 
@@ -763,12 +769,45 @@ check_bookworm_or_later() {
   esac
 }
 
-internet_probe_targets() {
-  # Keep this in sync with provision_nvme_gui.py::have_internet.
+mesh_registry_tcp_target_line() {
+  # host:port derived from DEFAULT_MESH_HOST (mirrors provision_nvme_gui.py::parse_mesh_host_for_probe).
+  MH="${DEFAULT_MESH_HOST:-}" python3 - <<'PY'
+import os
+from urllib.parse import urlparse
+
+default_h = "dserv.net"
+raw = (os.environ.get("MH") or "").strip()
+if not raw:
+    raw = "https://dserv.net"
+if "://" not in raw:
+    raw = "https://" + raw
+parsed = urlparse(raw)
+host = (parsed.hostname or "").strip() or default_h
+port = parsed.port or 443
+print(f"{host}:{port}")
+PY
+}
+
+internet_probe_baseline_targets() {
   printf '%s\n' \
     "1.1.1.1:443" \
     "1.0.0.1:443" \
     "93.184.216.34:80"
+}
+
+internet_probe_service_targets() {
+  printf '%s\n' \
+    "$(mesh_registry_tcp_target_line)" \
+    "downloads.raspberrypi.org:443" \
+    "github.com:443" \
+    "api.github.com:443" \
+    "objects.githubusercontent.com:443"
+}
+
+internet_probe_targets() {
+  # Combined list for diagnostics; have_internet treats baseline vs services differently.
+  internet_probe_baseline_targets
+  internet_probe_service_targets
 }
 
 internet_probe_targets_text() {
@@ -798,27 +837,43 @@ probe_tcp_target() {
 }
 
 have_internet() {
-  # Best-effort connectivity check without requiring curl/ping.
-  local target
+  # At least one baseline target, then every registry + service hostname must answer.
+  local target baseline_ok="false"
   while IFS= read -r target; do
-    probe_tcp_target "$target" && return 0
-  done < <(internet_probe_targets)
-  return 1
+    if probe_tcp_target "$target"; then
+      baseline_ok="true"
+      break
+    fi
+  done < <(internet_probe_baseline_targets)
+  [[ "$baseline_ok" == "true" ]] || return 1
+
+  while IFS= read -r target; do
+    probe_tcp_target "$target" || return 1
+  done < <(internet_probe_service_targets)
+  return 0
 }
 
-# Hostnames used by apt on Raspberry Pi OS inside the NVMe chroot. Keep in sync with
-# provision_nvme_gui.py::APT_MIRROR_DNS_HOSTS.
-apt_mirror_dns_hosts() {
+# Hostnames that must resolve for provisioning (apt, image, GitHub, registry). Mirrors
+# provision_nvme_gui.py::required_dns_hostnames.
+provision_critical_dns_hosts() {
+  local reg_host
+  reg_host="$(mesh_registry_tcp_target_line)"
+  reg_host="${reg_host%:*}"
   printf '%s\n' \
     deb.debian.org \
-    archive.raspberrypi.com
+    archive.raspberrypi.com \
+    downloads.raspberrypi.org \
+    github.com \
+    api.github.com \
+    objects.githubusercontent.com \
+    "$reg_host" | sort -u
 }
 
-warn_if_apt_mirror_dns_fails() {
+warn_if_provision_critical_dns_fails() {
   local h failed=()
 
   if ! have_cmd getent; then
-    log "WARNING: getent not available; skipping apt mirror DNS check."
+    log "WARNING: getent not available; skipping provisioning DNS host check."
     return 0
   fi
   while IFS= read -r h; do
@@ -826,7 +881,7 @@ warn_if_apt_mirror_dns_fails() {
     if ! getent ahosts "$h" >/dev/null 2>&1; then
       failed+=("$h")
     fi
-  done < <(apt_mirror_dns_hosts)
+  done < <(provision_critical_dns_hosts)
 
   [[ "${#failed[@]}" -eq 0 ]] && return 0
 
@@ -835,8 +890,8 @@ warn_if_apt_mirror_dns_fails() {
     [[ -n "$joined" ]] && joined+=", "
     joined+="$f"
   done
-  log "WARNING: DNS lookup failed for apt mirror hostname(s): $joined"
-  log "WARNING: Chroot apt may report \"Temporary failure resolving\" for those hosts. Check DNS (/etc/resolv.conf) and your network."
+  log "WARNING: DNS lookup failed for provisioning hostname(s): $joined"
+  log "WARNING: apt, image downloads, GitHub, or registry steps may fail. Check DNS (/etc/resolv.conf) and your network."
 }
 
 wait_for_internet() {
@@ -940,15 +995,15 @@ update_self_if_possible() {
 }
 
 have_internet_via_iface() {
-  # Verifies internet reachability over a specific interface by binding the socket to that interface.
+  # Verifies connectivity over a specific interface (SO_BINDTODEVICE). Matches have_internet semantics.
   local iface="$1"
   [[ -n "$iface" ]] || return 1
 
-  # Preferred: python3 socket with SO_BINDTODEVICE (we're root).
   if have_cmd python3; then
-    IFACE="$iface" python3 - <<'PY' >/dev/null 2>&1
+    IFACE="$iface" MH="${DEFAULT_MESH_HOST:-}" python3 - <<'PY' >/dev/null 2>&1
 import os
 import socket
+from urllib.parse import urlparse
 
 iface = os.environ.get("IFACE", "")
 if not iface:
@@ -958,30 +1013,50 @@ opt = iface.encode("utf-8", errors="strict")
 if not opt.endswith(b"\0"):
     opt += b"\0"
 
-targets = [
-    ("1.1.1.1", 443),
-    ("1.0.0.1", 443),
-    ("93.184.216.34", 443),
-    ("93.184.216.34", 80),
-]
 
-for host, port in targets:
+def tcp(h, p):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(3)
-    s.setsockopt(socket.SOL_SOCKET, 25, opt)  # SO_BINDTODEVICE = 25
+    s.setsockopt(socket.SOL_SOCKET, 25, opt)
     try:
-        s.connect((host, port))
-        s.close()
-        raise SystemExit(0)
-    except Exception:
-        pass
+        s.connect((h, int(p)))
+        return True
+    except OSError:
+        return False
     finally:
         try:
             s.close()
         except Exception:
             pass
 
-raise SystemExit(1)
+
+baseline = [
+    ("1.1.1.1", 443),
+    ("1.0.0.1", 443),
+    ("93.184.216.34", 80),
+]
+if not any(tcp(h, p) for h, p in baseline):
+    raise SystemExit(1)
+
+raw = (os.environ.get("MH") or "").strip()
+if not raw:
+    raw = "https://dserv.net"
+if "://" not in raw:
+    raw = "https://" + raw
+pr = urlparse(raw)
+rh = (pr.hostname or "").strip() or "dserv.net"
+rp = pr.port or 443
+extras = [
+    (rh, rp),
+    ("downloads.raspberrypi.org", 443),
+    ("github.com", 443),
+    ("api.github.com", 443),
+    ("objects.githubusercontent.com", 443),
+]
+for h, port in extras:
+    if not tcp(h, port):
+        raise SystemExit(1)
+raise SystemExit(0)
 PY
     return $?
   fi
@@ -2411,11 +2486,16 @@ main() {
   wifi_pass="$ANSWER_WIFI_PASSWORD"
   wifi_hidden="$ANSWER_WIFI_HIDDEN"
 
-  if ! wait_for_internet 30 3; then
+  if [[ "${ANSWER_CONNECTIVITY_CONTINUE_ANYWAY:-}" == "true" || "${ANSWER_CONNECTIVITY_CONTINUE_ANYWAY:-}" == "YES" ]]; then
+    log "WARNING: Answers set connectivity_continue_anyway: failures from wait_for_internet will not abort this script."
+    if ! wait_for_internet 30 3; then
+      log "WARNING: Strict internet probes did not succeed within timeout; continuing anyway."
+    fi
+  elif ! wait_for_internet 30 3; then
     die "No internet connectivity after checking $(internet_probe_targets_text). Wi-Fi may be connected but blocked by a captive portal, firewall, or a route/DNS issue."
   fi
   log "Internet connectivity verified."
-  warn_if_apt_mirror_dns_fails
+  warn_if_provision_critical_dns_fails
 
   if [[ "$HB_SELFUPDATE_NO_INTERNET" == "1" ]]; then
     log "Self-update: retrying now that internet connectivity is verified..."

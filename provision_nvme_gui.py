@@ -21,6 +21,7 @@ from pathlib import Path
 import queue
 import re
 import shutil
+from urllib.parse import urlparse
 import socket
 import subprocess
 import sys
@@ -468,32 +469,167 @@ def check_accessories():
     }
 
 
-def have_internet():
-    for host, port in [
-        ("1.1.1.1", 443),
-        ("1.0.0.1", 443),
-        ("93.184.216.34", 80),
-    ]:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3)
+DEFAULT_REGISTRY_PROBE_HOST = "dserv.net"
+
+# Baseline reachability: succeed if any of these TCP connects (captive / partial paths).
+# Host:port — keep in sync with provision_nvme.sh::internet_probe_targets first three lines.
+CONNECTIVITY_BASELINE_TCP = [
+    ("1.1.1.1", 443),
+    ("1.0.0.1", 443),
+    ("93.184.216.34", 80),
+]
+
+# Required services (host, port) beyond registry — order matches plan / shell.
+FIXED_SERVICE_PROBE_TCP = [
+    ("downloads.raspberrypi.org", 443),
+    ("github.com", 443),
+    ("api.github.com", 443),
+    ("objects.githubusercontent.com", 443),
+]
+
+
+def parse_mesh_host_for_probe(mesh_host):
+    """Return (hostname, port) for connectivity probes from device_defaults mesh_host URL or host string."""
+    raw = (mesh_host or "").strip()
+    if not raw:
+        return DEFAULT_REGISTRY_PROBE_HOST, 443
+    if "://" not in raw:
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    host = (parsed.hostname or "").strip()
+    if not host:
+        return DEFAULT_REGISTRY_PROBE_HOST, 443
+    port = parsed.port or 443
+    return host, port
+
+
+def required_dns_hostnames(registry_hostname):
+    hosts = [
+        "deb.debian.org",
+        "archive.raspberrypi.com",
+        "downloads.raspberrypi.org",
+        "github.com",
+        "api.github.com",
+        "objects.githubusercontent.com",
+        (registry_hostname or DEFAULT_REGISTRY_PROBE_HOST).strip() or DEFAULT_REGISTRY_PROBE_HOST,
+    ]
+    return tuple(dict.fromkeys(h for h in hosts if h))
+
+
+def _tcp_connect_probe(host, port, bind_iface=None, timeout_s=3):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout_s)
+    try:
+        if bind_iface:
+            opt = bind_iface.encode("utf-8")
+            if not opt.endswith(b"\0"):
+                opt += b"\0"
+            sock.setsockopt(socket.SOL_SOCKET, 25, opt)  # SO_BINDTODEVICE
+        sock.connect((host, int(port)))
+        return True, ""
+    except OSError as exc:
+        err = getattr(exc, "strerror", None) or str(exc)
+        return False, err
+    finally:
+        sock.close()
+
+
+def connectivity_checks_report(registry_host, registry_port, bind_iface=None):
+    """Ordered checklist rows: baseline, DNS per host, then TCP to each required endpoint.
+
+    bind_iface: wireless interface name for SO_BINDTODEVICE, or None for default routing.
+    Each row: dict with keys key, title, ok, detail (str).
+    """
+    rows = []
+    reg_host = registry_host or DEFAULT_REGISTRY_PROBE_HOST
+    reg_port = int(registry_port or 443)
+
+    hits = []
+    for host, port in CONNECTIVITY_BASELINE_TCP:
+        ok, detail = _tcp_connect_probe(host, port, bind_iface=bind_iface)
+        if ok:
+            hits.append(f"{host}:{port}")
+            break
+    rows.append(
+        {
+            "key": "baseline_tcp",
+            "title": "Baseline internet (Cloudflare / example.com)",
+            "ok": bool(hits),
+            "detail": ("OK via " + hits[0]) if hits else "Could not reach any baseline address",
+        }
+    )
+
+    for hostname in required_dns_hostnames(reg_host):
         try:
-            sock.connect((host, port))
-            return True
-        except OSError:
-            continue
-        finally:
-            sock.close()
-    return False
+            socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            err = getattr(exc, "strerror", None) or str(exc)
+            rows.append(
+                {
+                    "key": f"dns:{hostname}",
+                    "title": f"DNS: {hostname}",
+                    "ok": False,
+                    "detail": err,
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "key": f"dns:{hostname}",
+                    "title": f"DNS: {hostname}",
+                    "ok": True,
+                    "detail": "",
+                }
+            )
+
+    service_targets = [(reg_host, reg_port, f"Registry ({reg_host}:{reg_port})")]
+    for host, port in FIXED_SERVICE_PROBE_TCP:
+        service_targets.append((host, port, f"TCP: {host}:{port}"))
+
+    for host, port, title in service_targets:
+        ok, detail = _tcp_connect_probe(host, port, bind_iface=bind_iface)
+        rows.append(
+            {
+                "key": f"tcp:{host}:{port}",
+                "title": title,
+                "ok": ok,
+                "detail": detail if not ok else "",
+            }
+        )
+
+    return rows
 
 
-# Hostnames apt uses when updating the flashed OS. Keep in sync with provision_nvme.sh::apt_mirror_dns_hosts.
-APT_MIRROR_DNS_HOSTS = ("deb.debian.org", "archive.raspberrypi.com")
+def connectivity_report_all_ok(rows):
+    return bool(rows) and all(r.get("ok") for r in rows)
 
 
-def apt_mirror_dns_failures():
-    """Return [(hostname, error_message), ...] for hosts that do not resolve."""
+def summarize_connectivity_rows(rows):
+    lines = []
+    for r in rows:
+        label = r.get("title", r.get("key", "?"))
+        status = "OK" if r.get("ok") else "FAIL"
+        extra = r.get("detail") or ""
+        if extra:
+            lines.append(f"  [{status}] {label} — {extra}")
+        else:
+            lines.append(f"  [{status}] {label}")
+    return "\n".join(lines)
+
+
+def have_internet(registry_hostname=None, registry_port=None):
+    """True only if baseline reachable and all DNS + required TCP probes pass (default routing)."""
+    reg_host = (registry_hostname or DEFAULT_REGISTRY_PROBE_HOST).strip() or DEFAULT_REGISTRY_PROBE_HOST
+    reg_p = registry_port if registry_port is not None else 443
+    rows = connectivity_checks_report(reg_host, reg_p, bind_iface=None)
+    return connectivity_report_all_ok(rows)
+
+
+# Hostnames for DNS resolution — mirrors provision_nvme.sh::provision_critical_dns_hosts
+def provision_critical_dns_failures(registry_hostname=None):
     failed = []
-    for host in APT_MIRROR_DNS_HOSTS:
+    reg_host = (registry_hostname or DEFAULT_REGISTRY_PROBE_HOST).strip() or DEFAULT_REGISTRY_PROBE_HOST
+    for host in required_dns_hostnames(reg_host):
         try:
             socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
         except OSError as exc:
@@ -502,17 +638,16 @@ def apt_mirror_dns_failures():
     return failed
 
 
-def warn_apt_mirror_dns_if_needed(parent=None):
-    failures = apt_mirror_dns_failures()
+def warn_critical_dns_if_needed(parent=None, registry_hostname=None):
+    failures = provision_critical_dns_failures(registry_hostname)
     if not failures:
         return
     detail = "\n".join(f"  • {host}: {err}" for host, err in failures)
     messagebox.showwarning(
-        "DNS check for software servers",
-        "Could not resolve one or more host names used when installing packages "
-        "on the new drive:\n\n"
+        "DNS check for provisioning servers",
+        "Could not resolve one or more host names required for downloads, apt, GitHub, or registry:\n\n"
         f"{detail}\n\n"
-        "Provisioning may fail during the apt step unless DNS works. "
+        "Provisioning may fail unless DNS works. "
         "If you use Wi-Fi or a strict network, check router DNS settings or /etc/resolv.conf.",
         parent=parent,
     )
@@ -641,40 +776,9 @@ def wait_for_ipv4(iface, timeout_s=90):
         if iface_has_ipv4(iface):
             return True
         time.sleep(1)
-    return False
-
-
-def internet_reachable_via_iface(iface):
-    targets = [
-        ("1.1.1.1", 443),
-        ("1.0.0.1", 443),
-        ("93.184.216.34", 443),
-        ("93.184.216.34", 80),
-    ]
-    iface_opt = iface.encode("utf-8")
-    if not iface_opt.endswith(b"\0"):
-        iface_opt += b"\0"
-
-    for host, port in targets:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, 25, iface_opt)  # SO_BINDTODEVICE
-            sock.connect((host, port))
-            return True
-        except OSError:
-            continue
-        finally:
-            sock.close()
-    return False
 
 
 def safe_connection_name(ssid):
-    safe_ssid = re.sub(r"[^A-Za-z0-9_.-]+", "_", ssid).strip("_")
-    return f"hb-wifi-{safe_ssid or 'network'}-{uuid.uuid4().hex[:8]}"
-
-
-def _strip_nmcli_secret_value(raw):
     """Normalize a secret string from nmcli -g or tabular output."""
     if raw is None:
         return ""
@@ -857,9 +961,20 @@ def hb_secret_agent(typed_psk):
                 pass
 
 
-def test_wifi_connection(ssid, password, *, hidden=False):
+def test_wifi_connection(
+    ssid,
+    password,
+    *,
+    hidden=False,
+    registry_host=None,
+    registry_port=None,
+    on_connected=None,
+):
     if not ssid:
-        return {"ok": True, "tested": False, "internet_reachable": False, "message": "Wi-Fi skipped."}
+        return {"ok": True, "tested": False, "internet_reachable": False, "message": "Wi-Fi skipped.", "connectivity_report": []}
+
+    reg_h = (registry_host or DEFAULT_REGISTRY_PROBE_HOST).strip() or DEFAULT_REGISTRY_PROBE_HOST
+    reg_p = registry_port if registry_port is not None else 443
 
     if shutil.which("nmcli") is None:
         return {
@@ -867,6 +982,7 @@ def test_wifi_connection(ssid, password, *, hidden=False):
             "tested": False,
             "internet_reachable": False,
             "message": "nmcli is not available. Install NetworkManager or skip Wi-Fi.",
+            "connectivity_report": [],
         }
 
     nmcli(["radio", "wifi", "on"], timeout=10)
@@ -879,6 +995,7 @@ def test_wifi_connection(ssid, password, *, hidden=False):
             "tested": False,
             "internet_reachable": False,
             "message": "No Wi-Fi interface was found.",
+            "connectivity_report": [],
         }
 
     previous_connection = active_connection_for_iface(iface)
@@ -913,6 +1030,7 @@ def test_wifi_connection(ssid, password, *, hidden=False):
                 "tested": True,
                 "internet_reachable": False,
                 "message": f"Failed to create a temporary Wi-Fi connection for '{ssid}'.",
+                "connectivity_report": [],
             }
         created_connection = True
 
@@ -941,6 +1059,7 @@ def test_wifi_connection(ssid, password, *, hidden=False):
                 "tested": True,
                 "internet_reachable": False,
                 "message": f"NetworkManager rejected the password settings for '{ssid}'.",
+                "connectivity_report": [],
             }
 
         with hb_secret_agent(password):
@@ -951,6 +1070,7 @@ def test_wifi_connection(ssid, password, *, hidden=False):
                     "tested": True,
                     "internet_reachable": False,
                     "message": f"Failed to connect to '{ssid}'. Check the password and try again.",
+                    "connectivity_report": [],
                 }
             connected_connection = True
 
@@ -961,6 +1081,7 @@ def test_wifi_connection(ssid, password, *, hidden=False):
                     "tested": True,
                     "internet_reachable": False,
                     "message": f"Connected Wi-Fi mismatch. Expected '{ssid}', got '{got_ssid or '<none>'}'.",
+                    "connectivity_report": [],
                 }
 
             if not wait_for_ipv4(iface):
@@ -969,13 +1090,21 @@ def test_wifi_connection(ssid, password, *, hidden=False):
                     "tested": True,
                     "internet_reachable": False,
                     "message": f"Connected to '{ssid}', but no IPv4 address was acquired.",
+                    "connectivity_report": [],
                 }
 
             actual_password = read_connection_wifi_psk(connection_name)
             if not actual_password:
                 actual_password = password
 
-        internet_ok = internet_reachable_via_iface(iface)
+        if callable(on_connected):
+            try:
+                on_connected(iface)
+            except Exception:
+                pass
+
+        connectivity_report = connectivity_checks_report(reg_h, reg_p, bind_iface=iface)
+        internet_ok = connectivity_report_all_ok(connectivity_report)
         restore_message = restore_previous_connection()
         message = f"Connected to '{ssid}'."
         if previous_connection:
@@ -983,7 +1112,7 @@ def test_wifi_connection(ssid, password, *, hidden=False):
         else:
             message += " Leaving this Wi-Fi connected for provisioning."
         if not internet_ok:
-            message += " Internet probe over Wi-Fi failed; Ethernet may still provide internet."
+            message += " Required connectivity checks over Wi-Fi did not all pass."
 
         return {
             "ok": True,
@@ -991,6 +1120,7 @@ def test_wifi_connection(ssid, password, *, hidden=False):
             "internet_reachable": internet_ok,
             "message": message,
             "actual_password": actual_password,
+            "connectivity_report": connectivity_report,
         }
     finally:
         if not connected_connection:
@@ -1020,6 +1150,7 @@ class ProvisioningWizard(tk.Tk):
         self._keyboard_shift = False
         self._keyboard_rows_frame = None
         self._last_wifi_test_signature = None
+        self._critical_dns_warned = False
 
         self.answers = {
             "wifi_country": DEFAULT_WIFI_COUNTRY,
@@ -1413,7 +1544,7 @@ class ProvisioningWizard(tk.Tk):
             self._render_current_step()
 
     def _refresh_wifi_scan(self):
-        dialog = self._show_busy_dialog(
+        dialog, _body = self._show_busy_dialog(
             "Scanning Wi-Fi",
             "Enabling Wi-Fi radio, applying country settings, and scanning for nearby networks.",
         )
@@ -1442,7 +1573,8 @@ class ProvisioningWizard(tk.Tk):
             return
 
         print(json.dumps(self.answers, indent=2, sort_keys=True))
-        warn_apt_mirror_dns_if_needed(parent=self)
+        reg_host, _reg_port = self._registry_probe_target()
+        warn_critical_dns_if_needed(parent=self, registry_hostname=reg_host)
         if not self._launch_backend():
             return
         self.withdraw()
@@ -1907,7 +2039,7 @@ class ProvisioningWizard(tk.Tk):
             fg=FG,
             font=FONT_TITLE,
         ).pack(anchor="w", padx=30, pady=(25, 10))
-        tk.Label(
+        body = tk.Label(
             dialog,
             text=text,
             bg=BG,
@@ -1915,14 +2047,143 @@ class ProvisioningWizard(tk.Tk):
             font=FONT_LABEL,
             justify="left",
             wraplength=680,
-        ).pack(anchor="w", fill="x", padx=30, pady=(0, 25))
+        )
+        body.pack(anchor="w", fill="x", padx=30, pady=(0, 25))
         self._finalize_modal(dialog, parent=self, geometry="760x220+260+180")
-        return dialog
+        return dialog, body
 
     def _show_timed_message(self, title, text, milliseconds=2000):
-        dialog = self._show_busy_dialog(title, text)
+        dialog, _body = self._show_busy_dialog(title, text)
         dialog.after(milliseconds, dialog.destroy)
         self.wait_window(dialog)
+
+    def _registry_probe_target(self):
+        """(hostname, port) for mesh_host from the selected defaults section."""
+        section = (self.answers.get("defaults_section") or "").strip()
+        mesh = ""
+        if section and self.config.has_section(section):
+            mesh = self.config.get(section, "mesh_host", fallback="").strip()
+        return parse_mesh_host_for_probe(mesh)
+
+    def _confirm_connectivity_bypass(self):
+        return messagebox.askokcancel(
+            "Continue anyway?",
+            "Provisioning expects every connectivity check to pass. If you continue anyway, "
+            "the install may still fail during downloads, apt, GitHub, or the registry step.\n\n"
+            "Continue anyway?",
+            parent=self,
+            icon="warning",
+        )
+
+    def _connectivity_checklist_modal(self, rows):
+        """Show per-check results; return 'retry' | 'back' | 'continue'."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Connectivity check")
+        dialog.configure(bg=BG)
+
+        sw = max(480, self.winfo_screenwidth())
+        wrap_px = max(280, min(760, sw - 80))
+
+        tk.Label(
+            dialog,
+            text="Some connectivity checks failed",
+            bg=BG,
+            fg=ERROR,
+            font=FONT_TITLE,
+        ).pack(anchor="w", padx=30, pady=(18, 8))
+
+        tk.Label(
+            dialog,
+            text="Each line must pass for provisioning to reliably reach downloads, apt, GitHub, and the mesh registry.",
+            bg=BG,
+            fg=FG,
+            font=FONT_LABEL,
+            justify="left",
+            wraplength=wrap_px,
+        ).pack(anchor="w", padx=30, pady=(0, 8))
+
+        action = tk.StringVar(value="")
+
+        buttons = tk.Frame(dialog, bg=BG)
+        buttons.pack(side="bottom", fill="x", padx=30, pady=(0, 20))
+        retry_button = self._make_button(buttons, "Retry", lambda: action.set("retry"), primary=True)
+        retry_button.pack(side="left")
+        self._make_button(buttons, "Back", lambda: action.set("back")).pack(side="left", padx=15)
+        self._make_button(buttons, "Continue anyway", lambda: action.set("continue")).pack(side="right")
+
+        body_lines = summarize_connectivity_rows(rows)
+        sh = max(360, self.winfo_screenheight())
+        text_lines = max(8, min(22, (sh - 340) // 20))
+
+        msg_frame = tk.Frame(dialog, bg=BG)
+        msg_frame.pack(side="top", fill="both", expand=True, padx=30, pady=(0, 12))
+
+        msg_widget = tk.Text(
+            msg_frame,
+            wrap="word",
+            font=FONT_LABEL,
+            bg=ENTRY_BG,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+            highlightthickness=0,
+            padx=12,
+            pady=12,
+            height=text_lines,
+            width=max(36, wrap_px // 10),
+            state="normal",
+        )
+        msg_widget.insert("1.0", body_lines or "(no detail)")
+        msg_widget.configure(state="disabled")
+
+        scroll = tk.Scrollbar(msg_frame, command=msg_widget.yview, bg=ENTRY_BG, troughcolor=BG)
+        msg_widget.configure(yscrollcommand=scroll.set)
+        msg_widget.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        self._fit_modal_to_screen(dialog, max_width=min(900, sw))
+        self._finalize_modal(
+            dialog,
+            focus_widget=retry_button,
+            parent=self,
+            geometry=None,
+        )
+        dialog.wait_variable(action)
+        choice = action.get()
+        dialog.grab_release()
+        dialog.destroy()
+        self.focus_force()
+        return choice or "retry"
+
+    def _run_connectivity_gate(self, bind_iface=None):
+        """Prompt until checks pass or user bypasses (Ethernet / default route path)."""
+        reg_h, reg_p = self._registry_probe_target()
+        while True:
+            rows = connectivity_checks_report(reg_h, reg_p, bind_iface)
+            if connectivity_report_all_ok(rows):
+                self.answers["connectivity_continue_anyway"] = False
+                self.answers.pop("connectivity_checks_last_report", None)
+                return True
+
+            self.answers["connectivity_checks_last_report"] = [dict(r) for r in rows]
+            choice = self._connectivity_checklist_modal(rows)
+            if choice == "retry":
+                continue
+            if choice == "back":
+                return False
+            if choice == "continue" and self._confirm_connectivity_bypass():
+                self.answers["connectivity_continue_anyway"] = True
+                return True
+        return False
+
+    def _connectivity_review_summary(self):
+        if self.answers.get("connectivity_continue_anyway"):
+            return "Bypassed — install may fail network steps"
+        if self.answers.get("wifi_ssid"):
+            if self.answers.get("wifi_internet_reachable"):
+                return "All checks passed (Wi‑Fi path)"
+            return "Incomplete"
+        return "All checks passed (Ethernet)"
 
     def _ask_wifi_failure_action(self, message):
         dialog = tk.Toplevel(self)
@@ -2058,12 +2319,13 @@ class ProvisioningWizard(tk.Tk):
             self._self_update_retry_needed = False
             return
 
-        if not have_internet():
+        reg_host, reg_port = self._registry_probe_target()
+        if not have_internet(reg_host, reg_port):
             self._self_update_retry_needed = True
             print(f"Self-update: no internet during {phase}; will retry after internet is available.")
             return
 
-        dialog = self._show_busy_dialog(
+        dialog, _body = self._show_busy_dialog(
             "Checking for updates",
             "Checking GitHub for the latest provisioning GUI and defaults.",
         )
@@ -2373,7 +2635,7 @@ class ProvisioningWizard(tk.Tk):
         entry.focus_set()
 
     def _run_accessory_checks(self):
-        dialog = self._show_busy_dialog(
+        dialog, _body = self._show_busy_dialog(
             "Checking accessories",
             "Looking for touchscreen, juicer, power monitor, and camera.",
         )
@@ -2499,6 +2761,7 @@ class ProvisioningWizard(tk.Tk):
                 "Yes" if self.answers.get("wifi_hidden") else "No",
             ),
             ("Wi-Fi test", self._wifi_test_summary()),
+            ("Network / connectivity", self._connectivity_review_summary()),
             ("Accessory checks", self._accessory_check_summary()),
             ("Timezone", self.answers.get("timezone", "")),
             ("Locale", self.answers.get("locale", "")),
@@ -2538,11 +2801,13 @@ class ProvisioningWizard(tk.Tk):
         if not self.answers.get("wifi_ssid"):
             return "(skipped)"
         if self.answers.get("wifi_continue_anyway"):
-            return "Failed, continuing anyway"
+            return "Failed, continuing anyway (password / association)"
+        if self.answers.get("connectivity_continue_anyway") and self.answers.get("wifi_test_passed"):
+            return "Connected; connectivity bypassed"
         if self.answers.get("wifi_test_passed"):
             if self.answers.get("wifi_internet_reachable"):
-                return "Connected, internet reachable"
-            return "Connected, internet not confirmed"
+                return "Connected, all checks passed"
+            return "Connected, checks failed or bypassed"
         if not self.answers.get("wifi_tested"):
             return "Not tested"
         return "Failed"
@@ -2596,6 +2861,10 @@ class ProvisioningWizard(tk.Tk):
             self.answers["defaults_device_type"] = device_type
             self.answers["defaults_section"] = section
             self._apply_defaults_section(section)
+            if not self._critical_dns_warned:
+                self._critical_dns_warned = True
+                rh, _rp = self._registry_probe_target()
+                warn_critical_dns_if_needed(parent=self, registry_hostname=rh)
 
         elif step_name == "_step_wifi_country":
             value = self._wifi_country_var.get().strip().upper() or DEFAULT_WIFI_COUNTRY
@@ -2669,6 +2938,8 @@ class ProvisioningWizard(tk.Tk):
                 self.answers.pop("wifi_continue_anyway", None)
                 self.answers.pop("wifi_internet_reachable", None)
                 self.answers.pop("wifi_test_message", None)
+                self.answers.pop("connectivity_continue_anyway", None)
+                self.answers.pop("connectivity_checks_last_report", None)
             self.answers["wifi_ssid"] = value
             self.answers["wifi_hidden"] = hidden if value else False
             if not value:
@@ -2678,14 +2949,15 @@ class ProvisioningWizard(tk.Tk):
                 self.answers["wifi_test_passed"] = False
                 self.answers["wifi_continue_anyway"] = False
                 self.answers["wifi_internet_reachable"] = False
+                self.answers["connectivity_continue_anyway"] = False
+                self.answers.pop("connectivity_checks_last_report", None)
                 self._last_wifi_test_signature = None
-                if not have_internet():
-                    messagebox.showerror(
-                        "Internet required",
-                        "No Wi-Fi SSID was selected, and this device does not currently have internet. "
-                        "Connect Ethernet or go Back and enter Wi-Fi credentials before continuing.",
-                    )
+                if not self._run_connectivity_gate(bind_iface=None):
                     return False
+                self.answers["wifi_internet_reachable"] = not self.answers.get(
+                    "connectivity_continue_anyway", False
+                )
+                return True
 
         elif step_name == "_step_wifi_password":
             value = self._wifi_password_var.get()
@@ -2706,14 +2978,35 @@ class ProvisioningWizard(tk.Tk):
                 and self._last_wifi_test_signature == test_signature
             )
             if not already_tested:
+                reg_h, reg_p = self._registry_probe_target()
+                busy_phase1 = (
+                    "Connecting briefly to verify the password.\n"
+                    "The current Wi-Fi network will be restored afterwards."
+                )
+                busy_phase2 = (
+                    "Checking required sites and downloads over this Wi‑Fi:\n\n"
+                    "• Mesh / registry host\n"
+                    "• Raspberry Pi OS image downloads\n"
+                    "• GitHub (clone / updates)\n"
+                    "• Debian and Raspberry Pi mirrors (DNS + TCP)\n\n"
+                    "Please wait…"
+                )
                 while True:
-                    dialog = self._show_busy_dialog(
-                        "Testing Wi-Fi",
-                        "Connecting briefly to verify the password.\n"
-                        "The current Wi-Fi network will be restored afterwards.",
-                    )
+                    dialog, body = self._show_busy_dialog("Testing Wi-Fi", busy_phase1)
+
+                    def _on_connected(_iface):
+                        body.config(text=busy_phase2)
+                        dialog.update_idletasks()
+
                     try:
-                        result = test_wifi_connection(ssid, value, hidden=hidden_now)
+                        result = test_wifi_connection(
+                            ssid,
+                            value,
+                            hidden=hidden_now,
+                            registry_host=reg_h,
+                            registry_port=reg_p,
+                            on_connected=_on_connected,
+                        )
                     finally:
                         dialog.grab_release()
                         dialog.destroy()
@@ -2737,24 +3030,42 @@ class ProvisioningWizard(tk.Tk):
                                 self.step_index = self.steps.index(self._step_wifi_ssid)
                                 self._render_current_step()
                             return False
-                        internet_ok = have_internet()
-                        self.answers["wifi_internet_reachable"] = internet_ok
-                        if not internet_ok:
-                            messagebox.showerror(
-                                "Internet required",
-                                "The Wi-Fi credentials were accepted, but this device still does not have internet. "
-                                "Provisioning needs internet for downloads and repository updates.",
+
+                        wifi_probe_ok = bool(result.get("internet_reachable"))
+                        post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
+                        post_probe_ok = connectivity_report_all_ok(post_rows)
+                        failure_rows = list(result.get("connectivity_report") or [])
+                        if wifi_probe_ok and not post_probe_ok:
+                            failure_rows = post_rows
+
+                        if wifi_probe_ok and post_probe_ok:
+                            self.answers["connectivity_continue_anyway"] = False
+                            self.answers.pop("connectivity_checks_last_report", None)
+                            self.answers["wifi_internet_reachable"] = True
+                            self._last_wifi_test_signature = test_signature
+                            self._show_timed_message(
+                                "Success!",
+                                "Required sites and downloads are reachable.",
+                                milliseconds=2000,
                             )
+                            if self._self_update_retry_needed:
+                                self._maybe_self_update("post-wifi")
+                            break
+
+                        self.answers["connectivity_checks_last_report"] = [dict(r) for r in failure_rows]
+                        choice = self._connectivity_checklist_modal(failure_rows)
+                        if choice == "retry":
+                            continue
+                        if choice == "back":
+                            self.step_index = self.steps.index(self._step_wifi_ssid)
+                            self._render_current_step()
                             return False
-                        self._last_wifi_test_signature = test_signature
-                        self._show_timed_message(
-                            "Success!",
-                            "Internet connection verified!",
-                            milliseconds=2000,
-                        )
-                        if self._self_update_retry_needed:
-                            self._maybe_self_update("post-wifi")
-                        break
+                        if choice == "continue" and self._confirm_connectivity_bypass():
+                            self.answers["connectivity_continue_anyway"] = True
+                            self.answers["wifi_internet_reachable"] = False
+                            self._last_wifi_test_signature = test_signature
+                            break
+                        continue
 
                     self._last_wifi_test_signature = None
                     action = self._ask_wifi_failure_action(result["message"])
