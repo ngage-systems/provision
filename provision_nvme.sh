@@ -506,6 +506,11 @@ accessory_checks = data.get("accessory_checks", {})
 if not isinstance(accessory_checks, dict):
     accessory_checks = {}
 print(f"ANSWER_ACCESSORY_CHECKS_JSON={shlex.quote(json.dumps(accessory_checks, sort_keys=True))}")
+
+wifi_networks = data.get("wifi_networks")
+if not isinstance(wifi_networks, list):
+    wifi_networks = []
+print(f"ANSWER_WIFI_NETWORKS_JSON={shlex.quote(json.dumps(wifi_networks, sort_keys=True))}")
 PY
 )"
   eval "$assignments"
@@ -553,16 +558,65 @@ validate_int_range() {
   (( value >= min && value <= max )) || die "$name must be between $min and $max."
 }
 
+validate_wifi_answers() {
+  need_cmd python3
+  ANSWER_WIFI_NETWORKS_JSON="${ANSWER_WIFI_NETWORKS_JSON:-[]}" \
+    ANSWER_WIFI_SSID="${ANSWER_WIFI_SSID:-}" \
+    ANSWER_WIFI_PASSWORD="${ANSWER_WIFI_PASSWORD:-}" \
+    python3 - <<'PY'
+import json
+import os
+import sys
+
+raw = os.environ.get("ANSWER_WIFI_NETWORKS_JSON", "[]")
+try:
+    arr = json.loads(raw)
+except json.JSONDecodeError:
+    print("ERROR: wifi_networks in answers is not valid JSON.", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(arr, list):
+    print("ERROR: wifi_networks must be a JSON array.", file=sys.stderr)
+    sys.exit(1)
+
+def bad_line(s):
+    return "\n" in s or "\r" in s
+
+if arr:
+    for i, item in enumerate(arr):
+        if not isinstance(item, dict):
+            print("ERROR: Each wifi_networks entry must be an object.", file=sys.stderr)
+            sys.exit(1)
+        ssid = str(item.get("ssid", "")).strip()
+        pw = str(item.get("password", ""))
+        if not ssid:
+            print("ERROR: wifi_networks entries must include a non-empty ssid.", file=sys.stderr)
+            sys.exit(1)
+        if not pw:
+            print("ERROR: wifi_networks entries must include a password.", file=sys.stderr)
+            sys.exit(1)
+        if bad_line(ssid) or bad_line(pw):
+            print("ERROR: Wi-Fi SSID and password cannot contain newline characters.", file=sys.stderr)
+            sys.exit(1)
+else:
+    ssid = os.environ.get("ANSWER_WIFI_SSID", "").strip()
+    if ssid:
+        pw = os.environ.get("ANSWER_WIFI_PASSWORD", "")
+        if not pw:
+            print("ERROR: Missing required answer: wifi_password", file=sys.stderr)
+            sys.exit(1)
+        if bad_line(ssid) or bad_line(pw):
+            print("ERROR: Wi-Fi SSID and password cannot contain newline characters.", file=sys.stderr)
+            sys.exit(1)
+sys.exit(0)
+PY
+}
+
 validate_answers() {
   require_answer "wifi_country" "$ANSWER_WIFI_COUNTRY"
   ANSWER_WIFI_COUNTRY="${ANSWER_WIFI_COUNTRY^^}"
   [[ "$ANSWER_WIFI_COUNTRY" =~ ^[A-Z]{2}$ ]] || die "Invalid Wi-Fi country '$ANSWER_WIFI_COUNTRY'."
 
-  if [[ -n "$ANSWER_WIFI_SSID" ]]; then
-    require_answer "wifi_password" "$ANSWER_WIFI_PASSWORD"
-    [[ "$ANSWER_WIFI_SSID" != *$'\n'* && "$ANSWER_WIFI_SSID" != *$'\r'* ]] || die "Wi-Fi SSID cannot contain newlines."
-    [[ "$ANSWER_WIFI_PASSWORD" != *$'\n'* && "$ANSWER_WIFI_PASSWORD" != *$'\r'* ]] || die "Wi-Fi password cannot contain newlines."
-  fi
+  validate_wifi_answers || die "Wi-Fi answers validation failed."
 
   require_answer "timezone" "$ANSWER_TIMEZONE"
   [[ -f "/usr/share/zoneinfo/${ANSWER_TIMEZONE}" ]] || die "Invalid timezone '$ANSWER_TIMEZONE'."
@@ -1766,6 +1820,113 @@ find_nvme_partition() {
   esac
 }
 
+write_nm_wifi_profiles() {
+  local root_mnt="$1"
+  local answers_file="${2:-}"
+  local legacy_ssid="${3:-}"
+  local legacy_pass="${4:-}"
+  local legacy_hidden="${5:-}"
+  need_cmd python3
+  ROOT_MNT="$root_mnt" ANSWERS_FILE="$answers_file" \
+    LEGACY_SSID="$legacy_ssid" LEGACY_PASS="$legacy_pass" LEGACY_HIDDEN="$legacy_hidden" \
+    python3 - <<'PY'
+import json
+import os
+import pathlib
+
+root = pathlib.Path(os.environ["ROOT_MNT"])
+nm_dir = root / "etc/NetworkManager/system-connections"
+nm_dir.mkdir(parents=True, exist_ok=True)
+
+
+def hidden_bool(raw):
+    if isinstance(raw, bool):
+        return raw
+    s = str(raw or "").strip().lower()
+    return s in ("true", "yes", "1")
+
+
+def load_networks():
+    path = (os.environ.get("ANSWERS_FILE") or "").strip()
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        if isinstance(data, dict):
+            wn = data.get("wifi_networks")
+            if isinstance(wn, list) and wn:
+                out = []
+                for item in wn:
+                    if not isinstance(item, dict):
+                        continue
+                    ssid = str(item.get("ssid", "")).strip()
+                    if not ssid:
+                        continue
+                    out.append(
+                        (
+                            ssid,
+                            str(item.get("password") or ""),
+                            hidden_bool(item.get("hidden")),
+                        )
+                    )
+                if out:
+                    return out
+    ssid = (os.environ.get("LEGACY_SSID") or "").strip()
+    if not ssid:
+        return []
+    return [
+        (
+            ssid,
+            os.environ.get("LEGACY_PASS") or "",
+            hidden_bool(os.environ.get("LEGACY_HIDDEN")),
+        )
+    ]
+
+
+def sanitize_filename(stem, idx):
+    safe = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in stem)
+    safe = "_".join(safe.split()) or "wifi"
+    return f"hb-wifi-{idx}-{safe}"
+
+
+for idx, (ssid, pw, is_hidden) in enumerate(load_networks(), start=1):
+    fname = sanitize_filename(ssid, idx) + ".nmconnection"
+    nm_path = nm_dir / fname
+    lines = [
+        "[connection]",
+        f"id={ssid}",
+        "type=wifi",
+        "autoconnect=true",
+        "",
+        "[wifi]",
+        "mode=infrastructure",
+        f"ssid={ssid}",
+    ]
+    if is_hidden:
+        lines.append("hidden=true")
+    lines.extend(
+        [
+            "",
+            "[wifi-security]",
+            "key-mgmt=wpa-psk",
+            f"psk={pw}",
+            "",
+            "[ipv4]",
+            "method=auto",
+            "",
+            "[ipv6]",
+            "method=auto",
+            "",
+        ]
+    )
+    nm_path.write_text("\n".join(lines), encoding="utf-8")
+    os.chmod(nm_path, 0o600)
+    os.chown(nm_path, 0, 0)
+PY
+}
+
 write_headless_config() {
   local boot_mnt="$1"
   local root_mnt="$2"
@@ -1782,6 +1943,7 @@ write_headless_config() {
   local screen_h="${13}"
   local screen_r="${14}"
   local screen_rot="${15}"
+  local answers_file="${16:-}"
 
   log "Configuring NVMe OS (SSH/user/Wi-Fi)..."
 
@@ -1858,51 +2020,7 @@ write_headless_config() {
     log "WARNING: Could not find cmdline.txt on boot partition to set display mode."
   fi
 
-  if [[ -n "$wifi_ssid" ]]; then
-    local nm_dir="${root_mnt}/etc/NetworkManager/system-connections"
-    mkdir -p "$nm_dir"
-    local nm_file
-    nm_file="$(echo "$wifi_ssid" | LC_ALL=C tr -cd 'A-Za-z0-9._ -' | sed 's/  */ /g' | sed 's/ /_/g')"
-    [[ -n "$nm_file" ]] || nm_file="wifi"
-    nm_file="${nm_dir}/${nm_file}.nmconnection"
-
-    local wifi_hidden_lc hidden_line=""
-    wifi_hidden_lc="$(printf '%s' "${wifi_hidden_raw:-}" | tr '[:upper:]' '[:lower:]')"
-    if [[ "$wifi_hidden_lc" == "true" || "$wifi_hidden_lc" == "yes" || "$wifi_hidden_lc" == "1" ]]; then
-      hidden_line="hidden=true"
-    fi
-
-    {
-      cat <<EOF
-[connection]
-id=${wifi_ssid}
-type=wifi
-autoconnect=true
-
-[wifi]
-mode=infrastructure
-ssid=${wifi_ssid}
-EOF
-      if [[ -n "$hidden_line" ]]; then
-        printf '%s\n' "$hidden_line"
-      fi
-      cat <<EOF
-
-[wifi-security]
-key-mgmt=wpa-psk
-psk=${wifi_pass}
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=auto
-EOF
-    } > "$nm_file"
-
-    chmod 600 "$nm_file"
-    chown root:root "$nm_file"
-  fi
+  write_nm_wifi_profiles "$root_mnt" "${16:-}" "$wifi_ssid" "$wifi_pass" "$wifi_hidden_raw"
 
   local nm_state_dir="${root_mnt}/var/lib/NetworkManager"
   mkdir -p "$nm_state_dir"
@@ -2553,7 +2671,7 @@ main() {
   MONITOR_HEIGHT_CM="$monitor_height"
   MONITOR_DISTANCE_CM="$monitor_distance"
 
-  write_headless_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$username" "$password" "$wifi_ssid" "$wifi_pass" "$wifi_hidden" "$hostname" "$wifi_country" "$timezone" "$locale" "$screen_w" "$screen_h" "$screen_r" "$screen_rot"
+  write_headless_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$username" "$password" "$wifi_ssid" "$wifi_pass" "$wifi_hidden" "$hostname" "$wifi_country" "$timezone" "$locale" "$screen_w" "$screen_h" "$screen_r" "$screen_rot" "$ANSWERS_FILE"
   ensure_user_exists_root "$HB_ROOT_MNT" "$username" "$password"
 
   configure_nvme_packages_and_services "$HB_ROOT_MNT" "$locale"

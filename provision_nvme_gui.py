@@ -1156,6 +1156,7 @@ class ProvisioningWizard(tk.Tk):
         self.answers = {
             "wifi_country": DEFAULT_WIFI_COUNTRY,
             "wifi_hidden": False,
+            "wifi_networks": [],
             "timezone": DEFAULT_TIMEZONE,
             "locale": DEFAULT_LOCALE,
             "screen_rotation": DEFAULT_SCREEN_ROTATION,
@@ -1225,6 +1226,9 @@ class ProvisioningWizard(tk.Tk):
             return
 
         self.answers.update(payload["answers"])
+        wn = self.answers.get("wifi_networks")
+        if not isinstance(wn, list):
+            self.answers["wifi_networks"] = []
         self.step_index = target_index
         self._wifi_ssid_manual_flow = target_step == "_step_wifi_ssid_manual"
         self._loaded_resume_state = True
@@ -1544,6 +1548,8 @@ class ProvisioningWizard(tk.Tk):
     def _on_next(self):
         if not self._validate_current_step():
             return
+        if self._maybe_branch_wifi_network_collection_after_password():
+            return
         if self.step_index < len(self.steps) - 1:
             self.step_index = self._next_index(self.step_index)
             self._render_current_step()
@@ -1573,9 +1579,92 @@ class ProvisioningWizard(tk.Tk):
             dialog.destroy()
             self.update_idletasks()
 
+    def _normalize_wifi_networks_for_export(self):
+        raw = self.answers.get("wifi_networks")
+        if not isinstance(raw, list):
+            raw = []
+        if not raw and (self.answers.get("wifi_ssid") or "").strip():
+            raw = [
+                {
+                    "ssid": (self.answers.get("wifi_ssid") or "").strip(),
+                    "password": self.answers.get("wifi_password") or "",
+                    "hidden": bool(self.answers.get("wifi_hidden")),
+                }
+            ]
+        self.answers["wifi_networks"] = raw
+        if raw:
+            first = raw[0]
+            self.answers["wifi_ssid"] = (first.get("ssid") or "").strip()
+            self.answers["wifi_password"] = first.get("password") or ""
+            self.answers["wifi_hidden"] = bool(first.get("hidden"))
+        else:
+            self.answers["wifi_ssid"] = ""
+            self.answers["wifi_password"] = ""
+            self.answers["wifi_hidden"] = False
+
+    def _sync_wifi_flat_from_primary_network(self):
+        nets = self.answers.get("wifi_networks")
+        if not isinstance(nets, list) or not nets:
+            return
+        first = nets[0]
+        self.answers["wifi_ssid"] = (first.get("ssid") or "").strip()
+        self.answers["wifi_password"] = first.get("password") or ""
+        self.answers["wifi_hidden"] = bool(first.get("hidden"))
+
+    def _clear_draft_wifi_for_additional_network(self):
+        self.answers["wifi_ssid"] = ""
+        self.answers["wifi_password"] = ""
+        self.answers["wifi_hidden"] = False
+        self.answers.pop("wifi_tested", None)
+        self.answers.pop("wifi_test_ssid", None)
+        self.answers.pop("wifi_test_hidden", None)
+        self.answers.pop("wifi_test_passed", None)
+        self.answers.pop("wifi_continue_anyway", None)
+        self.answers.pop("wifi_internet_reachable", None)
+        self.answers.pop("wifi_test_message", None)
+        self.answers.pop("connectivity_continue_anyway", None)
+        self.answers.pop("connectivity_checks_last_report", None)
+        self._last_wifi_test_signature = None
+        self._wifi_ssid_manual_flow = False
+
+    def _maybe_branch_wifi_network_collection_after_password(self):
+        if self.steps[self.step_index].__name__ != "_step_wifi_password":
+            return False
+        ssid = (self.answers.get("wifi_ssid") or "").strip()
+        if not ssid:
+            return False
+        pw = self.answers.get("wifi_password") or ""
+        hidden = bool(self.answers.get("wifi_hidden"))
+        nets = self.answers.setdefault("wifi_networks", [])
+        if not isinstance(nets, list):
+            nets = []
+            self.answers["wifi_networks"] = nets
+        if any((n.get("ssid") or "").strip() == ssid for n in nets):
+            messagebox.showerror(
+                "Duplicate Wi-Fi",
+                "This network is already in your saved list. Choose a different SSID or go Back.",
+                parent=self,
+            )
+            return True
+        nets.append({"ssid": ssid, "password": pw, "hidden": hidden})
+        if messagebox.askyesno(
+            "Add another network?",
+            "Add another Wi-Fi network?\n\n"
+            "Each saved network will be available on the device. Choose No to continue.",
+            parent=self,
+        ):
+            self._clear_draft_wifi_for_additional_network()
+            self.step_index = self.steps.index(self._step_wifi_ssid_pick)
+            self._render_current_step()
+            return True
+        self._sync_wifi_flat_from_primary_network()
+        return False
+
     def _on_finish(self):
         if not self._confirm_destructive_provision():
             return
+
+        self._normalize_wifi_networks_for_export()
 
         try:
             output_path = Path(self.output_path)
@@ -2227,7 +2316,7 @@ class ProvisioningWizard(tk.Tk):
     def _connectivity_review_summary(self):
         if self.answers.get("connectivity_continue_anyway"):
             return "Bypassed — install may fail network steps"
-        if self.answers.get("wifi_ssid"):
+        if self.answers.get("wifi_ssid") or self._wifi_saved_networks_list():
             if self.answers.get("wifi_internet_reachable"):
                 return "All checks passed (Wi‑Fi path)"
             return "Incomplete"
@@ -2791,11 +2880,8 @@ class ProvisioningWizard(tk.Tk):
         rows = [
             ("Defaults", self.answers.get("defaults_section", "(skipped)")),
             ("Wi-Fi country", self.answers.get("wifi_country", "")),
-            ("Wi-Fi SSID", self.answers.get("wifi_ssid", "(skipped)") or "(skipped)"),
-            (
-                "Wi-Fi hidden SSID",
-                "Yes" if self.answers.get("wifi_hidden") else "No",
-            ),
+            ("Wi-Fi SSID(s)", self._wifi_review_saved_ssids_text()),
+            ("Wi-Fi hidden SSID", self._wifi_review_saved_hidden_text()),
             ("Wi-Fi test", self._wifi_test_summary()),
             ("Network / connectivity", self._connectivity_review_summary()),
             ("Accessory checks", self._accessory_check_summary()),
@@ -2833,8 +2919,26 @@ class ProvisioningWizard(tk.Tk):
                 anchor="w",
             ).pack(side="left", fill="x", expand=True)
 
+    def _wifi_saved_networks_list(self):
+        nets = self.answers.get("wifi_networks")
+        if isinstance(nets, list) and nets:
+            return nets
+        return []
+
+    def _wifi_review_saved_ssids_text(self):
+        nets = self._wifi_saved_networks_list()
+        if nets:
+            return "; ".join((n.get("ssid") or "") for n in nets)
+        return self.answers.get("wifi_ssid", "(skipped)") or "(skipped)"
+
+    def _wifi_review_saved_hidden_text(self):
+        nets = self._wifi_saved_networks_list()
+        if nets:
+            return "; ".join("Yes" if n.get("hidden") else "No" for n in nets)
+        return "Yes" if self.answers.get("wifi_hidden") else "No"
+
     def _wifi_test_summary(self):
-        if not self.answers.get("wifi_ssid"):
+        if not self._wifi_saved_networks_list() and not self.answers.get("wifi_ssid"):
             return "(skipped)"
         if self.answers.get("wifi_continue_anyway"):
             return "Failed, continuing anyway (password / association)"
@@ -2981,6 +3085,13 @@ class ProvisioningWizard(tk.Tk):
             self.answers["wifi_hidden"] = False
             self._wifi_ssid_manual_flow = False
             if not value:
+                if self.answers.get("wifi_networks"):
+                    messagebox.showerror(
+                        "Wi-Fi required",
+                        "Select a Wi-Fi network from the list, use “Specify SSID not on this list”, or go Back.",
+                        parent=self,
+                    )
+                    return False
                 self.answers["wifi_password"] = ""
                 self.answers["wifi_hidden"] = False
                 self.answers["wifi_tested"] = False
