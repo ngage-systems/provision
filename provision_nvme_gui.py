@@ -646,6 +646,9 @@ def provision_critical_dns_failures(registry_hostname=None):
 
 
 def warn_critical_dns_if_needed(parent=None, registry_hostname=None):
+    if parent is not None and hasattr(parent, "_warn_critical_dns_if_needed"):
+        parent._warn_critical_dns_if_needed(registry_hostname=registry_hostname)
+        return
     failures = provision_critical_dns_failures(registry_hostname)
     if not failures:
         return
@@ -1656,10 +1659,9 @@ class ProvisioningWizard(tk.Tk):
             nets = []
             self.answers["wifi_networks"] = nets
         if any((n.get("ssid") or "").strip() == ssid for n in nets):
-            messagebox.showerror(
+            self._show_styled_error_modal(
                 "Duplicate Wi-Fi",
                 "This network is already in your saved list. Choose a different SSID or go Back.",
-                parent=self,
             )
             return True
         nets.append({"ssid": ssid, "password": pw, "hidden": hidden})
@@ -1692,12 +1694,15 @@ class ProvisioningWizard(tk.Tk):
             )
             os.chmod(output_path, 0o600)
         except OSError as exc:
-            messagebox.showerror("Save failed", f"Could not write {self.output_path}:\n{exc}")
+            self._show_styled_error_modal(
+                "Save failed",
+                f"Could not write {self.output_path}:\n{exc}",
+            )
             return
 
         print(json.dumps(self.answers, indent=2, sort_keys=True))
         reg_host, _reg_port = self._registry_probe_target()
-        warn_critical_dns_if_needed(parent=self, registry_hostname=reg_host)
+        self._warn_critical_dns_if_needed(registry_hostname=reg_host)
         if not self._launch_backend():
             return
         self.withdraw()
@@ -1814,7 +1819,10 @@ class ProvisioningWizard(tk.Tk):
     def _launch_backend(self):
         backend = Path(__file__).resolve().parent / "provision_nvme.sh"
         if not backend.is_file():
-            messagebox.showerror("Backend missing", f"Could not find provisioning backend:\n{backend}")
+            self._show_styled_error_modal(
+                "Backend missing",
+                f"Could not find provisioning backend:\n{backend}",
+            )
             return False
 
         provision_wrapper = Path("/usr/local/sbin/hb-provision-nvme")
@@ -1839,7 +1847,10 @@ class ProvisioningWizard(tk.Tk):
             )
         except OSError as exc:
             dialog.destroy()
-            messagebox.showerror("Launch failed", f"Could not start provisioning backend:\n{exc}")
+            self._show_styled_error_modal(
+                "Launch failed",
+                f"Could not start provisioning backend:\n{exc}",
+            )
             return False
 
         self._append_provision_log(
@@ -2040,7 +2051,7 @@ class ProvisioningWizard(tk.Tk):
             )
         except OSError as exc:
             reboot_button.config(state="normal", text="Reboot")
-            messagebox.showerror(
+            self._show_styled_error_modal(
                 "Reboot failed",
                 "Could not request reboot from the provisioning backend.\n\n"
                 f"{exc}",
@@ -2248,6 +2259,112 @@ class ProvisioningWizard(tk.Tk):
         dialog.after(milliseconds, dialog.destroy)
         self.wait_window(dialog)
 
+    def _show_styled_alert_modal(self, title, body_text, *, kind="error", wraplength=620):
+        """Themed alert: kind is 'error' (rose title) or 'warning' (accent title)."""
+        title_fg = ACCENT if kind == "warning" else ERROR
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.configure(bg=BG)
+        tk.Label(
+            dialog,
+            text=title,
+            bg=BG,
+            fg=title_fg,
+            font=FONT_TITLE,
+        ).pack(anchor="w", padx=40, pady=(30, 15))
+        tk.Label(
+            dialog,
+            text=body_text,
+            bg=BG,
+            fg=FG,
+            font=FONT_LABEL,
+            justify="left",
+            wraplength=wraplength,
+        ).pack(anchor="w", padx=40, pady=(0, 30))
+        buttons = tk.Frame(dialog, bg=BG)
+        buttons.pack(fill="x", padx=40, pady=(0, 35))
+        ok_button = self._make_button(buttons, "OK", dialog.destroy, primary=True)
+        ok_button.config(padx=60, pady=20, width=10)
+        ok_button.pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self._fit_modal_to_screen(dialog, max_width=720, min_height=200)
+        self._finalize_modal(dialog, focus_widget=ok_button, parent=self, geometry=None)
+        dialog.wait_window()
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.focus_force()
+
+    def _show_styled_error_modal(self, title, body_text, **kw):
+        self._show_styled_alert_modal(title, body_text, kind="error", **kw)
+
+    def _show_styled_warning_modal(self, title, body_text, **kw):
+        self._show_styled_alert_modal(title, body_text, kind="warning", **kw)
+
+    def _ask_styled_ok_cancel(self, title, body_text, *, wraplength=620):
+        """Same look as other modals; returns True for OK, False for Cancel or close."""
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.configure(bg=BG)
+        result = tk.BooleanVar(value=False)
+
+        def ok():
+            result.set(True)
+            dialog.destroy()
+
+        def cancel():
+            result.set(False)
+            dialog.destroy()
+
+        tk.Label(
+            dialog,
+            text=title,
+            bg=BG,
+            fg=ACCENT,
+            font=FONT_TITLE,
+        ).pack(anchor="w", padx=40, pady=(30, 15))
+        tk.Label(
+            dialog,
+            text=body_text,
+            bg=BG,
+            fg=FG,
+            font=FONT_LABEL,
+            justify="left",
+            wraplength=wraplength,
+        ).pack(anchor="w", padx=40, pady=(0, 30))
+        buttons = tk.Frame(dialog, bg=BG)
+        buttons.pack(fill="x", padx=40, pady=(0, 35))
+        cancel_button = self._make_button(buttons, "Cancel", cancel)
+        cancel_button.config(padx=50, pady=20, width=10)
+        cancel_button.pack(side="left")
+        ok_button = self._make_button(buttons, "OK", ok, primary=True)
+        ok_button.config(padx=50, pady=20, width=10)
+        ok_button.pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        self._fit_modal_to_screen(dialog, max_width=720, min_height=220)
+        self._finalize_modal(dialog, focus_widget=ok_button, parent=self, geometry=None)
+        dialog.wait_window()
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.focus_force()
+        return bool(result.get())
+
+    def _warn_critical_dns_if_needed(self, registry_hostname=None):
+        failures = provision_critical_dns_failures(registry_hostname)
+        if not failures:
+            return
+        detail = "\n".join(f"  • {host}: {err}" for host, err in failures)
+        self._show_styled_warning_modal(
+            "DNS check for provisioning servers",
+            "Could not resolve one or more host names required for downloads, apt, GitHub, or registry:\n\n"
+            f"{detail}\n\n"
+            "Provisioning may fail unless DNS works. "
+            "If you use Wi-Fi or a strict network, check router DNS settings or /etc/resolv.conf.",
+        )
+
     def _registry_probe_target(self):
         """(hostname, port) for mesh_host from the selected defaults section."""
         section = (self.answers.get("defaults_section") or "").strip()
@@ -2257,13 +2374,11 @@ class ProvisioningWizard(tk.Tk):
         return parse_mesh_host_for_probe(mesh)
 
     def _confirm_connectivity_bypass(self):
-        return messagebox.askokcancel(
+        return self._ask_styled_ok_cancel(
             "Continue anyway?",
             "Provisioning expects every connectivity check to pass. If you continue anyway, "
             "the install may still fail during downloads, apt, GitHub, or the registry step.\n\n"
             "Continue anyway?",
-            parent=self,
-            icon="warning",
         )
 
     def _connectivity_checklist_modal(self, rows, *, allow_redo_wifi=False):
@@ -2495,7 +2610,7 @@ class ProvisioningWizard(tk.Tk):
 
         if not result["ok"]:
             print(f"Self-update failed: {result['message']}")
-            messagebox.showwarning(
+            self._show_styled_warning_modal(
                 "Update check failed",
                 f"Could not update the provisioning GUI automatically.\n\n{result['message']}",
             )
@@ -2508,7 +2623,7 @@ class ProvisioningWizard(tk.Tk):
                 self._save_resume_state()
             except (OSError, TypeError) as exc:
                 print(f"Resume state: could not save before restart: {exc}")
-                messagebox.showwarning(
+                self._show_styled_warning_modal(
                     "Resume save failed",
                     "The provisioning GUI was updated, but it could not save the current answers "
                     f"before restarting.\n\n{exc}",
@@ -3050,7 +3165,7 @@ class ProvisioningWizard(tk.Tk):
         if step_name == "_step_defaults_group":
             value = self._defaults_group_var.get()
             if not value:
-                messagebox.showerror("Required", "Please select a device profile.")
+                self._show_styled_error_modal("Required", "Please select a device profile.")
                 return False
             self.answers["defaults_group"] = value
             self.answers.pop("defaults_device_type", None)
@@ -3062,11 +3177,11 @@ class ProvisioningWizard(tk.Tk):
                 return True
             device_type = self._defaults_type_var.get().strip()
             if not device_type:
-                messagebox.showerror("Required", "Please select a device type.")
+                self._show_styled_error_modal("Required", "Please select a device type.")
                 return False
             section = f"{group}.{device_type}"
             if not self.config.has_section(section):
-                messagebox.showerror("Invalid", f"Defaults section not found: {section}")
+                self._show_styled_error_modal("Invalid", f"Defaults section not found: {section}")
                 return False
             self.answers["defaults_device_type"] = device_type
             self.answers["defaults_section"] = section
@@ -3075,14 +3190,14 @@ class ProvisioningWizard(tk.Tk):
         elif step_name == "_step_wifi_country":
             value = self._wifi_country_var.get().strip().upper() or DEFAULT_WIFI_COUNTRY
             if not re.fullmatch(r"[A-Z]{2}", value):
-                messagebox.showerror("Invalid", "Wi-Fi country must be 2 letters like US.")
+                self._show_styled_error_modal("Invalid", "Wi-Fi country must be 2 letters like US.")
                 return False
             self.answers["wifi_country"] = value
 
         elif step_name == "_step_timezone":
             value = self._timezone_var.get().strip() or DEFAULT_TIMEZONE
             if not Path("/usr/share/zoneinfo", value).is_file():
-                messagebox.showerror(
+                self._show_styled_error_modal(
                     "Invalid",
                     "Timezone not found. Example: America/Los_Angeles, Europe/London, Asia/Tokyo.",
                 )
@@ -3092,39 +3207,39 @@ class ProvisioningWizard(tk.Tk):
         elif step_name == "_step_locale":
             value = self._locale_var.get().strip().lower() or DEFAULT_LOCALE
             if not re.fullmatch(r"[a-z]{2}_[a-z]{2}", value):
-                messagebox.showerror("Invalid", "Locale must look like en_us, en_gb, fr_fr, or de_de.")
+                self._show_styled_error_modal("Invalid", "Locale must look like en_us, en_gb, fr_fr, or de_de.")
                 return False
             base = f"{value[:2]}_{value[3:].upper()}"
             if not Path("/usr/share/i18n/locales", base).is_file():
-                messagebox.showerror("Invalid", f"Locale not found on this system: {value}")
+                self._show_styled_error_modal("Invalid", f"Locale not found on this system: {value}")
                 return False
             self.answers["locale"] = f"{base}.UTF-8"
 
         elif step_name == "_step_screen_width":
             value = self._screen_width_var.get().strip()
             if value and not self._valid_int(value, 320, 7680):
-                messagebox.showerror("Invalid", "Screen width must be a number between 320 and 7680.")
+                self._show_styled_error_modal("Invalid", "Screen width must be a number between 320 and 7680.")
                 return False
             self.answers["screen_pixels_width"] = value
 
         elif step_name == "_step_screen_height":
             value = self._screen_height_var.get().strip()
             if value and not self._valid_int(value, 240, 4320):
-                messagebox.showerror("Invalid", "Screen height must be a number between 240 and 4320.")
+                self._show_styled_error_modal("Invalid", "Screen height must be a number between 240 and 4320.")
                 return False
             self.answers["screen_pixels_height"] = value
 
         elif step_name == "_step_screen_refresh_rate":
             value = self._screen_refresh_var.get().strip()
             if value and not self._valid_int(value, 1, 360):
-                messagebox.showerror("Invalid", "Refresh rate must be a number between 1 and 360.")
+                self._show_styled_error_modal("Invalid", "Refresh rate must be a number between 1 and 360.")
                 return False
             self.answers["screen_refresh_rate"] = value
 
         elif step_name == "_step_screen_rotation":
             value = self._screen_rotation_var.get().strip() or DEFAULT_SCREEN_ROTATION
             if value not in {"0", "90", "180", "270"}:
-                messagebox.showerror("Invalid", "Screen rotation must be 0, 90, 180, or 270.")
+                self._show_styled_error_modal("Invalid", "Screen rotation must be 0, 90, 180, or 270.")
                 return False
             self.answers["screen_rotation"] = value
 
@@ -3137,7 +3252,7 @@ class ProvisioningWizard(tk.Tk):
                 value = ""
             hidden = False
             if "\n" in value or "\r" in value:
-                messagebox.showerror("Invalid", "Wi-Fi SSID cannot contain newline characters.")
+                self._show_styled_error_modal("Invalid", "Wi-Fi SSID cannot contain newline characters.")
                 return False
             prev_hidden = bool(self.answers.get("wifi_hidden"))
             if value != self.answers.get("wifi_ssid") or hidden != prev_hidden:
@@ -3156,10 +3271,9 @@ class ProvisioningWizard(tk.Tk):
             self._wifi_ssid_manual_flow = False
             if not value:
                 if self.answers.get("wifi_networks"):
-                    messagebox.showerror(
+                    self._show_styled_error_modal(
                         "Wi-Fi required",
                         "Select a Wi-Fi network from the list, use “Specify SSID not on this list”, or go Back.",
-                        parent=self,
                     )
                     return False
                 self.answers["wifi_password"] = ""
@@ -3182,13 +3296,13 @@ class ProvisioningWizard(tk.Tk):
             value = self._wifi_ssid_var.get().strip()
             hidden = bool(self._wifi_hidden_var.get())
             if not value:
-                messagebox.showerror(
+                self._show_styled_error_modal(
                     "Required",
                     "Enter the Wi-Fi network name (SSID), or go Back to choose from the list.",
                 )
                 return False
             if "\n" in value or "\r" in value:
-                messagebox.showerror("Invalid", "Wi-Fi SSID cannot contain newline characters.")
+                self._show_styled_error_modal("Invalid", "Wi-Fi SSID cannot contain newline characters.")
                 return False
             prev_hidden = bool(self.answers.get("wifi_hidden"))
             if value != self.answers.get("wifi_ssid") or hidden != prev_hidden:
@@ -3209,10 +3323,10 @@ class ProvisioningWizard(tk.Tk):
         elif step_name == "_step_wifi_password":
             value = self._wifi_password_var.get()
             if not value:
-                messagebox.showerror("Required", "Wi-Fi password cannot be empty. Go Back to skip Wi-Fi.")
+                self._show_styled_error_modal("Required", "Wi-Fi password cannot be empty. Go Back to skip Wi-Fi.")
                 return False
             if "\n" in value or "\r" in value:
-                messagebox.showerror("Invalid", "Wi-Fi password cannot contain newline characters.")
+                self._show_styled_error_modal("Invalid", "Wi-Fi password cannot contain newline characters.")
                 return False
             self.answers["wifi_password"] = value
             ssid = self.answers.get("wifi_ssid", "")
@@ -3280,11 +3394,10 @@ class ProvisioningWizard(tk.Tk):
                             post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
                         except Exception as exc:
                             print(f"Connectivity check (post-wifi, default route): {exc}")
-                            messagebox.showerror(
+                            self._show_styled_error_modal(
                                 "Connectivity check",
                                 f"Unexpected error while checking network reachability:\n{exc}\n\n"
                                 "Use Retry checks to try again, or fix the issue from a terminal.",
-                                parent=self,
                             )
                             continue
 
@@ -3354,14 +3467,14 @@ class ProvisioningWizard(tk.Tk):
         elif step_name == "_step_hostname":
             value = self._hostname_var.get().strip().lower()
             if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", value):
-                messagebox.showerror("Invalid", "Hostname must use a-z, 0-9, and hyphen, max 63 chars.")
+                self._show_styled_error_modal("Invalid", "Hostname must use a-z, 0-9, and hyphen, max 63 chars.")
                 return False
             self.answers["hostname"] = value
 
         elif step_name == "_step_username":
             value = self._username_var.get().strip()
             if not re.fullmatch(r"[a-z_][a-z0-9_-]*", value):
-                messagebox.showerror(
+                self._show_styled_error_modal(
                     "Invalid",
                     "Username must use a-z, 0-9, '_' or '-', and start with a letter or '_'.",
                 )
@@ -3371,7 +3484,7 @@ class ProvisioningWizard(tk.Tk):
         elif step_name == "_step_password":
             value = self._password_var.get()
             if not value:
-                messagebox.showerror("Required", "Empty password is not allowed.")
+                self._show_styled_error_modal("Required", "Empty password is not allowed.")
                 return False
             self.answers["password"] = value
 
@@ -3391,10 +3504,10 @@ class ProvisioningWizard(tk.Tk):
         try:
             number = float(value)
         except ValueError:
-            messagebox.showerror("Invalid", "Please enter a number.")
+            self._show_styled_error_modal("Invalid", "Please enter a number.")
             return False
         if number <= 0:
-            messagebox.showerror("Invalid", "Value must be greater than zero.")
+            self._show_styled_error_modal("Invalid", "Value must be greater than zero.")
             return False
         self.answers[key] = value
         return True
