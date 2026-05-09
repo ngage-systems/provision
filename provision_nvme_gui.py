@@ -90,7 +90,7 @@ DEFAULT_OUTPUT = "/tmp/hb_provision_answers.json"
 WIFI_SCAN_FILE = os.environ.get("HB_WIFI_SCAN_FILE", "/tmp/hb_wifi_scan_ssids.txt")
 REBOOT_REQUEST_FILE = os.environ.get("HB_PROVISION_REBOOT_REQUEST_FILE", "/tmp/hb_provision_reboot_requested")
 PROVISION_COMPLETE_MARKER = "Provisioning complete. Waiting for GUI reboot request."
-RESUME_STATE_VERSION = 1
+RESUME_STATE_VERSION = 2
 RESUME_STATE_FILE = os.environ.get("HB_PROVISION_GUI_RESUME_FILE", "/tmp/hb_provision_gui_resume.json")
 RESUME_STATE_MAX_AGE_SECONDS = 60 * 60
 ACCESSORY_CHECK_ITEMS = [
@@ -256,10 +256,17 @@ def read_resume_state(path=None):
         delete_resume_state(path)
         return None
 
-    if not isinstance(payload, dict) or payload.get("version") != RESUME_STATE_VERSION:
+    if not isinstance(payload, dict):
         print("Resume state: ignoring unsupported state file.")
         delete_resume_state(path)
         return None
+    version = payload.get("version")
+    if version not in (1, RESUME_STATE_VERSION):
+        print("Resume state: ignoring unsupported state file.")
+        delete_resume_state(path)
+        return None
+    if version == 1 and payload.get("target_step") == "_step_wifi_ssid":
+        payload["target_step"] = "_step_wifi_ssid_pick"
 
     created_at = payload.get("created_at")
     if not isinstance(created_at, (int, float)) or time.time() - created_at > RESUME_STATE_MAX_AGE_SECONDS:
@@ -1144,6 +1151,7 @@ class ProvisioningWizard(tk.Tk):
         self._keyboard_shift = False
         self._keyboard_rows_frame = None
         self._last_wifi_test_signature = None
+        self._wifi_ssid_manual_flow = False
 
         self.answers = {
             "wifi_country": DEFAULT_WIFI_COUNTRY,
@@ -1162,7 +1170,8 @@ class ProvisioningWizard(tk.Tk):
             self._step_defaults_group,
             self._step_defaults_device_type,
             self._step_wifi_country,
-            self._step_wifi_ssid,
+            self._step_wifi_ssid_pick,
+            self._step_wifi_ssid_manual,
             self._step_wifi_password,
             self._step_accessory_checks,
             self._step_timezone,
@@ -1208,14 +1217,16 @@ class ProvisioningWizard(tk.Tk):
         if not payload:
             return
 
-        target_index = self._step_index_for_name(payload["target_step"])
+        target_step = payload["target_step"]
+        target_index = self._step_index_for_name(target_step)
         if target_index is None:
-            print(f"Resume state: unknown target step {payload['target_step']!r}.")
+            print(f"Resume state: unknown target step {target_step!r}.")
             delete_resume_state()
             return
 
         self.answers.update(payload["answers"])
         self.step_index = target_index
+        self._wifi_ssid_manual_flow = target_step == "_step_wifi_ssid_manual"
         self._loaded_resume_state = True
 
         ssid = self.answers.get("wifi_ssid", "")
@@ -1506,22 +1517,28 @@ class ProvisioningWizard(tk.Tk):
 
     def _next_index(self, index):
         next_index = index + 1
-        if (
-            next_index < len(self.steps)
-            and self.steps[next_index].__name__ == "_step_wifi_password"
-            and not self.answers.get("wifi_ssid")
-        ):
-            next_index += 1
+        while next_index < len(self.steps):
+            name = self.steps[next_index].__name__
+            if name == "_step_wifi_ssid_manual" and not self._wifi_ssid_manual_flow:
+                next_index += 1
+                continue
+            if name == "_step_wifi_password" and not self.answers.get("wifi_ssid"):
+                next_index += 1
+                continue
+            break
         return next_index
 
     def _previous_index(self, index):
         previous_index = index - 1
-        if (
-            previous_index >= 0
-            and self.steps[previous_index].__name__ == "_step_wifi_password"
-            and not self.answers.get("wifi_ssid")
-        ):
-            previous_index -= 1
+        while previous_index >= 0:
+            name = self.steps[previous_index].__name__
+            if name == "_step_wifi_ssid_manual" and not self._wifi_ssid_manual_flow:
+                previous_index -= 1
+                continue
+            if name == "_step_wifi_password" and not self.answers.get("wifi_ssid"):
+                previous_index -= 1
+                continue
+            break
         return previous_index
 
     def _on_next(self):
@@ -1986,10 +2003,20 @@ class ProvisioningWizard(tk.Tk):
         entry.bind("<Button-1>", lambda _event, widget=entry: self._show_touch_keyboard(widget), add="+")
         return var, entry
 
-    def _add_listbox(self, entries, selected_value="", *, max_visible_rows=5):
+    def _add_listbox(
+        self,
+        entries,
+        selected_value="",
+        *,
+        max_visible_rows=5,
+        parent=None,
+        list_frame_pack=None,
+    ):
         var = tk.StringVar(value=selected_value)
-        list_frame = tk.Frame(self.content, bg=BG)
-        list_frame.pack(fill="x", pady=5)
+        list_parent = parent if parent is not None else self.content
+        pack_kw = list_frame_pack if list_frame_pack is not None else {"fill": "x", "pady": 5}
+        list_frame = tk.Frame(list_parent, bg=BG)
+        list_frame.pack(**pack_kw)
 
         listbox = tk.Listbox(
             list_frame,
@@ -2482,9 +2509,18 @@ class ProvisioningWizard(tk.Tk):
         )
         entry.focus_set()
 
-    def _step_wifi_ssid(self):
+    def _go_wifi_manual_ssid(self):
+        self._wifi_ssid_manual_flow = True
+        self.step_index = self.steps.index(self._step_wifi_ssid_manual)
+        self._render_current_step()
+
+    def _step_wifi_ssid_pick(self):
+        self._wifi_ssid_pick_listbox = None
         self._add_title("Choose Wi-Fi network")
-        self._add_label("Select a network, type a network name, or leave this blank if using Ethernet.")
+        self._add_label(
+            "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
+            "If your network does not appear after a rescan, use the button on the right."
+        )
         self._refresh_wifi_scan()
 
         scan_row = tk.Frame(self.content, bg=BG)
@@ -2501,14 +2537,43 @@ class ProvisioningWizard(tk.Tk):
                 wraplength=760,
             ).pack(side="left", padx=15)
 
+        list_btn_row = tk.Frame(self.content, bg=BG)
+        list_btn_row.pack(fill="x", pady=(0, 10))
+        list_col = tk.Frame(list_btn_row, bg=BG)
+        list_col.pack(side="left", fill="both", expand=True)
+
         if self.wifi_ssids:
             selected = self.answers.get("wifi_ssid", "")
-            self._ssid_list_var, listbox = self._add_listbox(self.wifi_ssids, selected, max_visible_rows=2)
+            self._ssid_list_var, listbox = self._add_listbox(
+                self.wifi_ssids,
+                selected,
+                max_visible_rows=2,
+                parent=list_col,
+                list_frame_pack={"fill": "both", "expand": True},
+            )
+            self._wifi_ssid_pick_listbox = listbox
             listbox.bind("<<ListboxSelect>>", self._on_ssid_list_select, add="+")
         else:
-            self._add_label("No scanned Wi-Fi networks found. You can type the SSID manually.", fg=MUTED)
+            tk.Label(
+                list_col,
+                text="No scanned Wi-Fi networks found.",
+                bg=BG,
+                fg=MUTED,
+                font=FONT_LABEL,
+                justify="left",
+                wraplength=560,
+            ).pack(anchor="w", pady=(0, 8))
             self._ssid_list_var = tk.StringVar(value="")
 
+        self._make_button(
+            list_btn_row,
+            "Specify SSID not on this list",
+            self._go_wifi_manual_ssid,
+        ).pack(side="right", padx=(12, 0), anchor="n")
+
+    def _step_wifi_ssid_manual(self):
+        self._add_title("Enter Wi-Fi network name")
+        self._add_label("Type the SSID exactly. Use the checkbox if the network does not broadcast its name.")
         self._wifi_ssid_var, entry = self._add_entry(self.answers.get("wifi_ssid", ""))
         self._wifi_hidden_var = tk.BooleanVar(value=bool(self.answers.get("wifi_hidden")))
         hid_row = tk.Frame(self.content, bg=BG)
@@ -2527,7 +2592,6 @@ class ProvisioningWizard(tk.Tk):
         entry.focus_set()
 
     def _on_ssid_list_select(self, _event):
-        self._wifi_ssid_var.set(self._ssid_list_var.get())
         self.btn_next.focus_set()
 
     def _step_wifi_password(self):
@@ -2883,9 +2947,14 @@ class ProvisioningWizard(tk.Tk):
                 return False
             self.answers["screen_rotation"] = value
 
-        elif step_name == "_step_wifi_ssid":
-            value = self._wifi_ssid_var.get().strip()
-            hidden = bool(self._wifi_hidden_var.get())
+        elif step_name == "_step_wifi_ssid_pick":
+            lb = getattr(self, "_wifi_ssid_pick_listbox", None)
+            if lb is not None:
+                sel = lb.curselection()
+                value = lb.get(sel[0]).strip() if sel else ""
+            else:
+                value = ""
+            hidden = False
             if "\n" in value or "\r" in value:
                 messagebox.showerror("Invalid", "Wi-Fi SSID cannot contain newline characters.")
                 return False
@@ -2902,7 +2971,8 @@ class ProvisioningWizard(tk.Tk):
                 self.answers.pop("connectivity_continue_anyway", None)
                 self.answers.pop("connectivity_checks_last_report", None)
             self.answers["wifi_ssid"] = value
-            self.answers["wifi_hidden"] = hidden if value else False
+            self.answers["wifi_hidden"] = False
+            self._wifi_ssid_manual_flow = False
             if not value:
                 self.answers["wifi_password"] = ""
                 self.answers["wifi_hidden"] = False
@@ -2918,7 +2988,35 @@ class ProvisioningWizard(tk.Tk):
                 self.answers["wifi_internet_reachable"] = not self.answers.get(
                     "connectivity_continue_anyway", False
                 )
-                return True
+            return True
+
+        elif step_name == "_step_wifi_ssid_manual":
+            value = self._wifi_ssid_var.get().strip()
+            hidden = bool(self._wifi_hidden_var.get())
+            if not value:
+                messagebox.showerror(
+                    "Required",
+                    "Enter the Wi-Fi network name (SSID), or go Back to choose from the list.",
+                )
+                return False
+            if "\n" in value or "\r" in value:
+                messagebox.showerror("Invalid", "Wi-Fi SSID cannot contain newline characters.")
+                return False
+            prev_hidden = bool(self.answers.get("wifi_hidden"))
+            if value != self.answers.get("wifi_ssid") or hidden != prev_hidden:
+                self._last_wifi_test_signature = None
+                self.answers.pop("wifi_tested", None)
+                self.answers.pop("wifi_test_ssid", None)
+                self.answers.pop("wifi_test_hidden", None)
+                self.answers.pop("wifi_test_passed", None)
+                self.answers.pop("wifi_continue_anyway", None)
+                self.answers.pop("wifi_internet_reachable", None)
+                self.answers.pop("wifi_test_message", None)
+                self.answers.pop("connectivity_continue_anyway", None)
+                self.answers.pop("connectivity_checks_last_report", None)
+            self.answers["wifi_ssid"] = value
+            self.answers["wifi_hidden"] = hidden
+            return True
 
         elif step_name == "_step_wifi_password":
             value = self._wifi_password_var.get()
@@ -3031,7 +3129,7 @@ class ProvisioningWizard(tk.Tk):
                             redo_full_wifi = True
                             break
                         if choice == "back":
-                            self.step_index = self.steps.index(self._step_wifi_ssid)
+                            self.step_index = self.steps.index(self._step_wifi_ssid_pick)
                             self._render_current_step()
                             return False
                         if choice == "continue":
@@ -3054,7 +3152,7 @@ class ProvisioningWizard(tk.Tk):
                     if action == "retry":
                         continue
                     if action == "edit":
-                        self.step_index = self.steps.index(self._step_wifi_ssid)
+                        self.step_index = self.steps.index(self._step_wifi_ssid_pick)
                         self._render_current_step()
                         return False
 
