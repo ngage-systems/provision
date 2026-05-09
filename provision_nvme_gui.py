@@ -1280,10 +1280,18 @@ class ProvisioningWizard(tk.Tk):
         self.nav = tk.Frame(self, bg=BG, padx=40, pady=10)
         self.nav.pack(side="bottom", fill="x")
 
-        self.btn_back = self._make_button(self.nav, "< Back", self._on_back)
+        self.progress_label = tk.Label(
+            self.nav, text="", bg=BG, fg=FG, font=FONT_LABEL
+        )
+        self.progress_label.pack(side="top", fill="x", pady=(0, 4))
+
+        nav_row = tk.Frame(self.nav, bg=BG)
+        nav_row.pack(side="top", fill="x")
+
+        self.btn_back = self._make_button(nav_row, "< Back", self._on_back)
         self.btn_back.pack(side="left")
 
-        self.nav_right = tk.Frame(self.nav, bg=BG)
+        self.nav_right = tk.Frame(nav_row, bg=BG)
         self.nav_right.pack(side="right")
 
         self.btn_recheck_accessories = self._make_button(
@@ -1293,10 +1301,6 @@ class ProvisioningWizard(tk.Tk):
         self.btn_next = self._make_button(self.nav_right, "Next >", self._on_next, primary=True)
         self.btn_next.pack(side="left")
 
-        self.progress_label = tk.Label(
-            self.nav, text="", bg=BG, fg=FG, font=FONT_LABEL
-        )
-        self.progress_label.pack(side="top", pady=5)
         self.nav.update_idletasks()
 
         self.content = tk.Frame(self, bg=BG, padx=40, pady=30)
@@ -1647,15 +1651,17 @@ class ProvisioningWizard(tk.Tk):
             )
             return True
         nets.append({"ssid": ssid, "password": pw, "hidden": hidden})
-        if messagebox.askyesno(
-            "Add another network?",
-            "Add another Wi-Fi network?\n\n"
-            "Each saved network will be available on the device. Choose No to continue.",
-            parent=self,
-        ):
+        if self._ask_add_another_wifi_network():
             self._clear_draft_wifi_for_additional_network()
             self.step_index = self.steps.index(self._step_wifi_ssid_pick)
             self._render_current_step()
+            try:
+                self.grab_release()
+            except tk.TclError:
+                pass
+            self.lift()
+            self.focus_force()
+            self.btn_next.lift()
             return True
         self._sync_wifi_flat_from_primary_network()
         return False
@@ -1683,6 +1689,58 @@ class ProvisioningWizard(tk.Tk):
         if not self._launch_backend():
             return
         self.withdraw()
+
+    def _ask_add_another_wifi_network(self):
+        """Styled modal matching the wizard. Returns True to add another network."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Add another network?")
+        dialog.configure(bg=BG)
+        result = tk.StringVar(value="no")
+
+        def choose(value):
+            result.set(value)
+            dialog.destroy()
+
+        tk.Label(
+            dialog,
+            text="Add another Wi-Fi network?",
+            bg=BG,
+            fg=FG,
+            font=FONT_TITLE,
+        ).pack(anchor="w", padx=40, pady=(30, 15))
+        tk.Label(
+            dialog,
+            text=(
+                "Each saved network will be written to the new system so it can connect "
+                "wherever those networks are in range.\n\n"
+                "Do you want to add another Wi-Fi network now?"
+            ),
+            bg=BG,
+            fg=FG,
+            font=FONT_LABEL,
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", padx=40, pady=(0, 30))
+
+        buttons = tk.Frame(dialog, bg=BG)
+        buttons.pack(fill="x", padx=40, pady=(0, 35))
+        no_button = self._make_button(buttons, "No", lambda: choose("no"))
+        no_button.config(padx=60, pady=24, width=8)
+        no_button.pack(side="left")
+        yes_button = self._make_button(buttons, "Yes", lambda: choose("yes"), primary=True)
+        yes_button.config(padx=60, pady=24, width=8)
+        yes_button.pack(side="right")
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("no"))
+        self._fit_modal_to_screen(dialog, max_width=720, min_height=220)
+        self._finalize_modal(dialog, focus_widget=yes_button, parent=self, geometry=None)
+        dialog.wait_window()
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.focus_force()
+        return result.get() == "yes"
 
     def _confirm_destructive_provision(self):
         dialog = tk.Toplevel(self)
