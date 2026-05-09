@@ -2011,12 +2011,18 @@ class ProvisioningWizard(tk.Tk):
         max_visible_rows=5,
         parent=None,
         list_frame_pack=None,
+        clamp_height_to_entries=True,
     ):
         var = tk.StringVar(value=selected_value)
         list_parent = parent if parent is not None else self.content
         pack_kw = list_frame_pack if list_frame_pack is not None else {"fill": "x", "pady": 5}
         list_frame = tk.Frame(list_parent, bg=BG)
         list_frame.pack(**pack_kw)
+
+        if clamp_height_to_entries:
+            list_height = min(max_visible_rows, max(1, len(entries)))
+        else:
+            list_height = max(1, max_visible_rows)
 
         listbox = tk.Listbox(
             list_frame,
@@ -2029,7 +2035,7 @@ class ProvisioningWizard(tk.Tk):
             highlightthickness=2,
             highlightbackground=ENTRY_BG,
             highlightcolor=ACCENT,
-            height=min(max_visible_rows, max(1, len(entries))),
+            height=list_height,
             activestyle="none",
         )
         for item in entries:
@@ -2550,6 +2556,7 @@ class ProvisioningWizard(tk.Tk):
                 max_visible_rows=10,
                 parent=list_col,
                 list_frame_pack={"fill": "both", "expand": True},
+                clamp_height_to_entries=False,
             )
             self._wifi_ssid_pick_listbox = listbox
             listbox.bind("<<ListboxSelect>>", self._on_ssid_list_select, add="+")
