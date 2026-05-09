@@ -1252,10 +1252,7 @@ class ProvisioningWizard(tk.Tk):
     def _current_resume_target_step_name(self):
         if not self.steps:
             return ""
-        step_name = self.steps[self.step_index].__name__
-        if step_name == "_step_wifi_password" and self.answers.get("wifi_tested") is True:
-            return self.steps[self._next_index(self.step_index)].__name__
-        return step_name
+        return self.steps[self.step_index].__name__
 
     def _save_resume_state(self):
         target_step = self._current_resume_target_step_name()
@@ -1597,6 +1594,10 @@ class ProvisioningWizard(tk.Tk):
             dialog.grab_release()
             dialog.destroy()
             self.update_idletasks()
+            try:
+                self.nav.lift()
+            except tk.TclError:
+                pass
 
     def _normalize_wifi_networks_for_export(self):
         raw = self.answers.get("wifi_networks")
@@ -1668,17 +1669,12 @@ class ProvisioningWizard(tk.Tk):
         if self._ask_add_another_wifi_network():
             self._clear_draft_wifi_for_additional_network()
             self.step_index = self.steps.index(self._step_wifi_ssid_pick)
-            self._render_current_step()
             try:
                 self.grab_release()
             except tk.TclError:
                 pass
-            self.lift()
-            self.focus_force()
-            try:
-                self.nav.lift()
-            except tk.TclError:
-                pass
+            # Run render next tick so nav.lift() wins over pending WM/focus events.
+            self.after(0, self._render_current_step)
             return True
         self._sync_wifi_flat_from_primary_network()
         return False
