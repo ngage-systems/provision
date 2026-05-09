@@ -1675,7 +1675,10 @@ class ProvisioningWizard(tk.Tk):
                 pass
             self.lift()
             self.focus_force()
-            self.btn_next.lift()
+            try:
+                self.nav.lift()
+            except tk.TclError:
+                pass
             return True
         self._sync_wifi_flat_from_primary_network()
         return False
