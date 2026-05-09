@@ -1305,6 +1305,9 @@ class ProvisioningWizard(tk.Tk):
 
         self.content = tk.Frame(self, bg=BG, padx=40, pady=30)
         self.content.pack(side="top", fill="both", expand=True)
+        # Content is packed after nav; when vertical space is tight, the expanding
+        # content can paint over the nav bar. Keep the content window below nav.
+        self.content.lower(self.nav)
 
     def _make_button(self, parent, text, command, primary=False):
         bg = ACCENT if primary else ENTRY_BG
@@ -1463,10 +1466,15 @@ class ProvisioningWizard(tk.Tk):
         self._focused_entry = entry
         if not self.keyboard.winfo_ismapped():
             self.keyboard.pack(side="bottom", fill="x", before=self.nav)
+            self.keyboard.lift(self.nav)
 
     def _hide_touch_keyboard(self):
         if self.keyboard.winfo_manager():
             self.keyboard.pack_forget()
+        try:
+            self.nav.lift()
+        except tk.TclError:
+            pass
 
     def _keyboard_toggle_shift(self):
         self._keyboard_shift = not self._keyboard_shift
@@ -1522,6 +1530,10 @@ class ProvisioningWizard(tk.Tk):
         else:
             self.btn_recheck_accessories.pack_forget()
         self.steps[self.step_index]()
+        try:
+            self.nav.lift()
+        except tk.TclError:
+            pass
 
     def _next_index(self, index):
         next_index = index + 1
