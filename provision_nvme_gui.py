@@ -2547,7 +2547,7 @@ class ProvisioningWizard(tk.Tk):
             self._ssid_list_var, listbox = self._add_listbox(
                 self.wifi_ssids,
                 selected,
-                max_visible_rows=2,
+                max_visible_rows=10,
                 parent=list_col,
                 list_frame_pack={"fill": "both", "expand": True},
             )
