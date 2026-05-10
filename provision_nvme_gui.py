@@ -1417,6 +1417,11 @@ class ProvisioningWizard(tk.Tk):
             # processed before the dialog becomes interactive.  Without this the
             # WM still considers the dialog unfocused and intercepts the first tap.
             dialog.update()
+            # Re-establish focus: update() can process WM ConfigureNotify events
+            # (e.g. when the WM repositions a dialog with a fixed geometry) that
+            # hand focus back to the parent.  A second focus_force() after the
+            # flush wins the focus back cleanly.
+            dialog.focus_force()
         except tk.TclError:
             pass
 
