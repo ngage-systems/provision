@@ -1268,25 +1268,26 @@ class ProvisioningWizard(tk.Tk):
         print(f"Resume state: saved wizard state for {target_step}.")
 
     # ------------------------------------------------------------------
-    # Layout: content expands, the touch keyboard appears above nav, and
-    # navigation stays pinned to the bottom of the window.
+    # Layout: an outer frame separates keyboard (root-level, side=bottom)
+    # from nav+content (inside outer).  This gives nav and content their
+    # own non-overlapping geometry regions so z-order between them is
+    # irrelevant — nav is always side=bottom of outer, content fills the
+    # rest above it.  Keyboard appearing/disappearing only resizes outer;
+    # it can never cover nav because they live at different hierarchy
+    # levels and different screen positions.
     # ------------------------------------------------------------------
-    def _restore_nav_z_order(self):
-        try:
-            self.content.lower(self.nav)
-            self.nav.lift()
-            if self.keyboard.winfo_ismapped():
-                self.keyboard.lift(self.nav)
-        except tk.TclError:
-            pass
-
     def _build_layout(self):
         self.keyboard = tk.Frame(
             self, bg=ENTRY_BG, padx=KEYBOARD_FRAME_PADX, pady=KEYBOARD_FRAME_PADY
         )
         self._build_touch_keyboard()
 
-        self.nav = tk.Frame(self, bg=BG, padx=40, pady=10)
+        # outer fills everything above the keyboard (which packs side=bottom
+        # in self when visible).  nav and content both live inside outer.
+        outer = tk.Frame(self, bg=BG)
+        outer.pack(side="top", fill="both", expand=True)
+
+        self.nav = tk.Frame(outer, bg=BG, padx=40, pady=10)
         self.nav.pack(side="bottom", fill="x")
 
         self.progress_label = tk.Label(
@@ -1312,13 +1313,8 @@ class ProvisioningWizard(tk.Tk):
 
         self.nav.update_idletasks()
 
-        self.content = tk.Frame(self, bg=BG, padx=40, pady=30)
+        self.content = tk.Frame(outer, bg=BG, padx=40, pady=30)
         self.content.pack(side="top", fill="both", expand=True)
-        # Content is packed after nav; when vertical space is tight, the expanding
-        # content can paint over the nav bar. Keep the content window below nav.
-        self.content.lower(self.nav)
-        self.content.bind("<Configure>", lambda _e: self._restore_nav_z_order(), add="+")
-        self.nav.bind("<Configure>", lambda _e: self._restore_nav_z_order(), add="+")
 
     def _make_button(self, parent, text, command, primary=False):
         bg = ACCENT if primary else ENTRY_BG
@@ -1476,13 +1472,14 @@ class ProvisioningWizard(tk.Tk):
     def _show_touch_keyboard(self, entry):
         self._focused_entry = entry
         if not self.keyboard.winfo_ismapped():
-            self.keyboard.pack(side="bottom", fill="x", before=self.nav)
-            self._restore_nav_z_order()
+            # keyboard packs into the root window (self), which is also the
+            # parent of outer.  keyboard side=bottom sits below outer, so it
+            # can never overlap nav or content inside outer — no lift needed.
+            self.keyboard.pack(side="bottom", fill="x")
 
     def _hide_touch_keyboard(self):
         if self.keyboard.winfo_manager():
             self.keyboard.pack_forget()
-        self._restore_nav_z_order()
 
     def _keyboard_toggle_shift(self):
         self._keyboard_shift = not self._keyboard_shift
@@ -1538,8 +1535,6 @@ class ProvisioningWizard(tk.Tk):
         else:
             self.btn_recheck_accessories.pack_forget()
         self.steps[self.step_index]()
-        self._restore_nav_z_order()
-        self.after(0, self._restore_nav_z_order)
 
     def _next_index(self, index):
         next_index = index + 1
@@ -1600,7 +1595,6 @@ class ProvisioningWizard(tk.Tk):
             dialog.grab_release()
             dialog.destroy()
             self.update_idletasks()
-            self._restore_nav_z_order()
 
     def _normalize_wifi_networks_for_export(self):
         raw = self.answers.get("wifi_networks")
@@ -1676,7 +1670,7 @@ class ProvisioningWizard(tk.Tk):
                 self.grab_release()
             except tk.TclError:
                 pass
-            # Next tick: clean layout/event state; render ends with _restore_nav_z_order.
+            # Run render next tick so nav.lift() wins over pending WM/focus events.
             self.after(0, self._render_current_step)
             return True
         self._sync_wifi_flat_from_primary_network()
