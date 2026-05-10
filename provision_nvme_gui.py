@@ -9,6 +9,9 @@ launches provision_nvme.sh after the user confirms the destructive erase step.
 Disable automatic git fetch/merge to refresh this repo before the wizard runs with
 ``--no-self-update`` or environment ``HB_PROVISION_NO_SELF_UPDATE=1`` (same as
 provision_nvme.sh).
+
+Set ``HB_DEBUG_MODAL_EVENTS=1`` to print modal choice vs Next navigation traces when
+debugging touch/focus issues.
 """
 
 import argparse
@@ -78,6 +81,9 @@ KEYBOARD_CTRL_SHIFT_W = _keyboard_scale(7)
 KEYBOARD_CTRL_SPACE_W = _keyboard_scale(18)
 KEYBOARD_CTRL_BACKSPACE_W = _keyboard_scale(10)
 KEYBOARD_CTRL_SMALL_W = _keyboard_scale(7)
+
+# Shift yes/no confirmation modals upward so their buttons stay clear of the main wizard nav row.
+MODAL_NAV_VERTICAL_BIAS_PX = 100
 
 DEFAULT_WIFI_COUNTRY = "US"
 DEFAULT_TIMEZONE = "America/New_York"
@@ -1390,6 +1396,10 @@ class ProvisioningWizard(tk.Tk):
 
         button.bind("<ButtonRelease-1>", on_release, add="+")
 
+    def _debug_modal_event(self, message):
+        if os.environ.get("HB_DEBUG_MODAL_EVENTS"):
+            print(f"[provision_nvme_gui modal] {message}", flush=True)
+
     def _finalize_modal(self, dialog, focus_widget=None, parent=None, geometry=None):
         if parent is not None:
             dialog.transient(parent)
@@ -1402,15 +1412,25 @@ class ProvisioningWizard(tk.Tk):
             pass
         try:
             dialog.lift()
-            dialog.grab_set()
+            grab_global = getattr(dialog, "grab_set_global", None)
+            if callable(grab_global):
+                try:
+                    grab_global()
+                except tk.TclError:
+                    dialog.grab_set()
+            else:
+                dialog.grab_set()
         except tk.TclError:
             pass
-        # Always focus the dialog toplevel, not a specific button widget.
-        # Buttons are created with takefocus=0; calling focus_force() on them
-        # puts X11 focus state in an inconsistent position (widget has Tk focus
-        # but the WM didn't acknowledge a non-focusable target), which causes
-        # the WM to intercept the first tap on that button to normalise focus.
-        # Focusing the toplevel itself is safe and sufficient for touch use.
+        # Brief topmost flash helps some WMs stack the modal above the parent nav so the
+        # first tap does not leak through to widgets underneath (e.g. primary Next button).
+        try:
+            dialog.attributes("-topmost", True)
+            dialog.update_idletasks()
+            dialog.update()
+            dialog.attributes("-topmost", False)
+        except tk.TclError:
+            pass
         try:
             dialog.focus_force()
             # Flush the X11 event queue so the WM's FocusIn acknowledgment is
@@ -1425,7 +1445,22 @@ class ProvisioningWizard(tk.Tk):
         except tk.TclError:
             pass
 
-    def _fit_modal_to_screen(self, dialog, max_width=900, min_height=200):
+        if focus_widget is not None:
+
+            def apply_default_focus():
+                try:
+                    if not focus_widget.winfo_exists():
+                        return
+                    # Scope takefocus=1 to modal default actions only; keeps tab focus sane and
+                    # lets the WM acknowledge a real focus target so the first tap activates Yes.
+                    focus_widget.configure(takefocus=1)
+                    focus_widget.focus_set()
+                except tk.TclError:
+                    pass
+
+            dialog.after_idle(apply_default_focus)
+
+    def _fit_modal_to_screen(self, dialog, max_width=900, min_height=200, vertical_bias_px=0):
         """Size and center a modal so all packed content fits (avoids clipping buttons on small displays)."""
         dialog.update_idletasks()
         sw = max(1, dialog.winfo_screenwidth())
@@ -1436,7 +1471,7 @@ class ProvisioningWizard(tk.Tk):
         w = min(max(req_w + 8, 400), min(max_width, sw - 2 * margin))
         h = min(max(req_h + 8, min_height), sh - 2 * margin)
         x = max(margin, (sw - w) // 2)
-        y = max(margin, (sh - h) // 2)
+        y = max(margin, (sh - h) // 2 + vertical_bias_px)
         dialog.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_touch_keyboard(self):
@@ -1579,6 +1614,7 @@ class ProvisioningWizard(tk.Tk):
         return previous_index
 
     def _on_next(self):
+        self._debug_modal_event("_on_next invoked")
         if not self._validate_current_step():
             return
         if self._maybe_branch_wifi_network_collection_after_password():
@@ -1727,6 +1763,7 @@ class ProvisioningWizard(tk.Tk):
         result = tk.StringVar(value="no")
 
         def choose(value):
+            self._debug_modal_event(f"add_another_wifi_network choose({value!r})")
             result.set(value)
             dialog.destroy()
 
@@ -1761,7 +1798,12 @@ class ProvisioningWizard(tk.Tk):
         yes_button.pack(side="right")
 
         dialog.protocol("WM_DELETE_WINDOW", lambda: choose("no"))
-        self._fit_modal_to_screen(dialog, max_width=720, min_height=220)
+        self._fit_modal_to_screen(
+            dialog,
+            max_width=720,
+            min_height=220,
+            vertical_bias_px=-MODAL_NAV_VERTICAL_BIAS_PX,
+        )
         self._finalize_modal(dialog, focus_widget=yes_button, parent=self, geometry=None)
         dialog.wait_window()
         try:
@@ -1779,6 +1821,7 @@ class ProvisioningWizard(tk.Tk):
         result = tk.BooleanVar(value=False)
 
         def choose(value):
+            self._debug_modal_event(f"confirm_destructive_provision choose({value!r})")
             result.set(value)
             dialog.destroy()
 
@@ -1818,6 +1861,7 @@ class ProvisioningWizard(tk.Tk):
         dialog.update_idletasks()
         x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
         y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
+        y = max(16, y - MODAL_NAV_VERTICAL_BIAS_PX)
         self._finalize_modal(dialog, focus_widget=yes_button, parent=self, geometry=f"+{x}+{y}")
         dialog.wait_window()
         self.focus_force()
