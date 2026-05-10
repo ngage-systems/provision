@@ -1480,6 +1480,10 @@ class ProvisioningWizard(tk.Tk):
     def _hide_touch_keyboard(self):
         if self.keyboard.winfo_manager():
             self.keyboard.pack_forget()
+            # Flush pending layout: pack_forget queues a resize of outer as an
+            # idle task.  Without this, the new step renders while outer is still
+            # sized as if the keyboard is present, leaving nav mispositioned.
+            self.update_idletasks()
 
     def _keyboard_toggle_shift(self):
         self._keyboard_shift = not self._keyboard_shift
