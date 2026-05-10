@@ -10,8 +10,8 @@ Disable automatic git fetch/merge to refresh this repo before the wizard runs wi
 ``--no-self-update`` or environment ``HB_PROVISION_NO_SELF_UPDATE=1`` (same as
 provision_nvme.sh).
 
-Set ``HB_DEBUG_MODAL_EVENTS=1`` to print modal choice vs Next navigation traces when
-debugging touch/focus issues.
+Set ``HB_DEBUG_MODAL_EVENTS=1`` for short ``[pv]`` traces (modal focus/grab, pointer
+hits on Wi‑Fi/install Yes/No, ``next``, choices).
 """
 
 import argparse
@@ -1322,7 +1322,7 @@ class ProvisioningWizard(tk.Tk):
         self.content = tk.Frame(outer, bg=BG, padx=40, pady=30)
         self.content.pack(side="top", fill="both", expand=True)
 
-    def _make_button(self, parent, text, command, primary=False):
+    def _make_button(self, parent, text, command, primary=False, pointer_trace_tag=None):
         bg = ACCENT if primary else ENTRY_BG
         active = ACCENT_ACTIVE if primary else "#45475a"
         invoked_at = {"time": 0.0}
@@ -1330,8 +1330,12 @@ class ProvisioningWizard(tk.Tk):
         def invoke_once():
             now = time.monotonic()
             if now - invoked_at["time"] < 0.25:
+                if pointer_trace_tag:
+                    self._debug_modal_event(f"inv skip tag={pointer_trace_tag}")
                 return
             invoked_at["time"] = now
+            if pointer_trace_tag:
+                self._debug_modal_event(f"inv run tag={pointer_trace_tag}")
             command()
 
         button = tk.Button(
@@ -1351,7 +1355,7 @@ class ProvisioningWizard(tk.Tk):
             cursor="hand2",
             takefocus=0,
         )
-        self._bind_touch_release(button, invoke_once)
+        self._bind_touch_release(button, invoke_once, trace_tag=pointer_trace_tag)
         return button
 
     def _make_keyboard_button(self, parent, text, command, width=None):
@@ -1385,43 +1389,100 @@ class ProvisioningWizard(tk.Tk):
         self._bind_touch_release(button, invoke_once)
         return button
 
-    def _bind_touch_release(self, button, command):
+    def _bind_touch_release(self, button, command, trace_tag=None):
+        dbg = bool(trace_tag and os.environ.get("HB_DEBUG_MODAL_EVENTS"))
+
+        def on_press(event):
+            if not dbg:
+                return None
+            try:
+                fg = self.focus_get()
+            except tk.TclError:
+                fg = None
+            self._debug_modal_event(
+                f"dn tag={trace_tag} xy={event.x_root},{event.y_root} fg={self._widget_dbg(fg)}"
+            )
+            return None
+
         def on_release(event):
             if str(button.cget("state")) == tk.DISABLED:
+                if dbg:
+                    self._debug_modal_event(f"up tag={trace_tag} disabled")
                 return None
-            if button.winfo_containing(event.x_root, event.y_root) is button:
+            containing = button.winfo_containing(event.x_root, event.y_root)
+            hit = containing is button
+            if dbg:
+                try:
+                    fg = self.focus_get()
+                except tk.TclError:
+                    fg = None
+                self._debug_modal_event(
+                    f"up tag={trace_tag} hit={int(hit)} xy={event.x_root},{event.y_root} "
+                    f"at={self._widget_dbg(containing)} fg={self._widget_dbg(fg)}"
+                )
+            if hit:
                 command()
                 return "break"
             return None
 
+        if trace_tag:
+            button.bind("<Button-1>", on_press, add="+")
         button.bind("<ButtonRelease-1>", on_release, add="+")
+
+    def _widget_dbg(self, widget):
+        if widget is None:
+            return "-"
+        try:
+            s = str(widget)
+        except Exception:
+            return "?"
+        return s if len(s) <= 52 else "..." + s[-48:]
 
     def _debug_modal_event(self, message):
         if os.environ.get("HB_DEBUG_MODAL_EVENTS"):
-            print(f"[provision_nvme_gui modal] {message}", flush=True)
+            print(f"[pv] {message}", flush=True)
 
     def _finalize_modal(self, dialog, focus_widget=None, parent=None, geometry=None):
+        dbg = bool(os.environ.get("HB_DEBUG_MODAL_EVENTS"))
+        if dbg:
+            try:
+                title = dialog.title()
+            except tk.TclError:
+                title = "?"
+            self._debug_modal_event(f"fin open tit={title!r}")
+
         if parent is not None:
             dialog.transient(parent)
         if geometry is not None:
             dialog.geometry(geometry)
         dialog.update_idletasks()
+        if dbg:
+            try:
+                self._debug_modal_event(f"fin geom={dialog.winfo_geometry()}")
+            except tk.TclError:
+                pass
         try:
             dialog.wait_visibility()
         except tk.TclError:
             pass
+        grab_mode = "-"
         try:
             dialog.lift()
             grab_global = getattr(dialog, "grab_set_global", None)
             if callable(grab_global):
                 try:
                     grab_global()
+                    grab_mode = "g"
                 except tk.TclError:
                     dialog.grab_set()
+                    grab_mode = "l"
             else:
                 dialog.grab_set()
+                grab_mode = "l"
         except tk.TclError:
-            pass
+            grab_mode = "!"
+        if dbg:
+            self._debug_modal_event(f"fin grab={grab_mode}")
         # Brief topmost flash helps some WMs stack the modal above the parent nav so the
         # first tap does not leak through to widgets underneath (e.g. primary Next button).
         try:
@@ -1431,6 +1492,8 @@ class ProvisioningWizard(tk.Tk):
             dialog.attributes("-topmost", False)
         except tk.TclError:
             pass
+        if dbg:
+            self._debug_modal_event("fin topmost off")
         try:
             dialog.focus_force()
             # Flush the X11 event queue so the WM's FocusIn acknowledgment is
@@ -1444,6 +1507,12 @@ class ProvisioningWizard(tk.Tk):
             dialog.focus_force()
         except tk.TclError:
             pass
+        if dbg:
+            try:
+                fg = dialog.focus_get()
+            except tk.TclError:
+                fg = None
+            self._debug_modal_event(f"fin ff fg={self._widget_dbg(fg)}")
 
         if focus_widget is not None:
 
@@ -1455,6 +1524,14 @@ class ProvisioningWizard(tk.Tk):
                     # lets the WM acknowledge a real focus target so the first tap activates Yes.
                     focus_widget.configure(takefocus=1)
                     focus_widget.focus_set()
+                    if dbg:
+                        try:
+                            fg = dialog.focus_get()
+                        except tk.TclError:
+                            fg = None
+                        self._debug_modal_event(
+                            f"fin defbtn fg={self._widget_dbg(fg)} btn={self._widget_dbg(focus_widget)}"
+                        )
                 except tk.TclError:
                     pass
 
@@ -1614,7 +1691,7 @@ class ProvisioningWizard(tk.Tk):
         return previous_index
 
     def _on_next(self):
-        self._debug_modal_event("_on_next invoked")
+        self._debug_modal_event("next")
         if not self._validate_current_step():
             return
         if self._maybe_branch_wifi_network_collection_after_password():
@@ -1763,7 +1840,7 @@ class ProvisioningWizard(tk.Tk):
         result = tk.StringVar(value="no")
 
         def choose(value):
-            self._debug_modal_event(f"add_another_wifi_network choose({value!r})")
+            self._debug_modal_event(f"wifi pick={value!r}")
             result.set(value)
             dialog.destroy()
 
@@ -1790,10 +1867,12 @@ class ProvisioningWizard(tk.Tk):
 
         buttons = tk.Frame(dialog, bg=BG)
         buttons.pack(fill="x", padx=40, pady=(0, 35))
-        no_button = self._make_button(buttons, "No", lambda: choose("no"))
+        no_button = self._make_button(buttons, "No", lambda: choose("no"), pointer_trace_tag="w:no")
         no_button.config(padx=60, pady=24, width=8)
         no_button.pack(side="left")
-        yes_button = self._make_button(buttons, "Yes", lambda: choose("yes"), primary=True)
+        yes_button = self._make_button(
+            buttons, "Yes", lambda: choose("yes"), primary=True, pointer_trace_tag="w:yes"
+        )
         yes_button.config(padx=60, pady=24, width=8)
         yes_button.pack(side="right")
 
@@ -1821,7 +1900,7 @@ class ProvisioningWizard(tk.Tk):
         result = tk.BooleanVar(value=False)
 
         def choose(value):
-            self._debug_modal_event(f"confirm_destructive_provision choose({value!r})")
+            self._debug_modal_event(f"install pick={value}")
             result.set(value)
             dialog.destroy()
 
@@ -1850,10 +1929,12 @@ class ProvisioningWizard(tk.Tk):
 
         buttons = tk.Frame(dialog, bg=BG)
         buttons.pack(fill="x", padx=40, pady=(0, 35))
-        no_button = self._make_button(buttons, "No", lambda: choose(False))
+        no_button = self._make_button(buttons, "No", lambda: choose(False), pointer_trace_tag="i:no")
         no_button.config(padx=60, pady=24, width=8)
         no_button.pack(side="left")
-        yes_button = self._make_button(buttons, "Yes", lambda: choose(True), primary=True)
+        yes_button = self._make_button(
+            buttons, "Yes", lambda: choose(True), primary=True, pointer_trace_tag="i:yes"
+        )
         yes_button.config(padx=60, pady=24, width=8)
         yes_button.pack(side="right")
 
