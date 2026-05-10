@@ -1965,7 +1965,7 @@ class ProvisioningWizard(tk.Tk):
         self._warn_critical_dns_if_needed(registry_hostname=reg_host)
         if not self._launch_backend():
             return
-        self.withdraw()
+        # Avoid withdraw(): provision log is Toplevel(self); unmapping the root blanks it on many WMs.
 
     def _ask_add_another_wifi_network(self):
         """Returns True to add another Wi‑Fi network (inline overlay; see _inline_yes_no_modal)."""
