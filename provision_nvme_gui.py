@@ -1405,18 +1405,17 @@ class ProvisioningWizard(tk.Tk):
             dialog.grab_set()
         except tk.TclError:
             pass
-        if focus_widget is not None and focus_widget.winfo_exists():
-            focus_widget.focus_force()
-        else:
-            try:
-                dialog.focus_force()
-            except tk.TclError:
-                pass
-        # Flush the X11 event queue so the WM's FocusIn acknowledgment is
-        # processed before the dialog becomes interactive.  Without this the
-        # WM still considers the dialog unfocused and intercepts the first tap
-        # to establish focus itself, silently eating it.
+        # Always focus the dialog toplevel, not a specific button widget.
+        # Buttons are created with takefocus=0; calling focus_force() on them
+        # puts X11 focus state in an inconsistent position (widget has Tk focus
+        # but the WM didn't acknowledge a non-focusable target), which causes
+        # the WM to intercept the first tap on that button to normalise focus.
+        # Focusing the toplevel itself is safe and sufficient for touch use.
         try:
+            dialog.focus_force()
+            # Flush the X11 event queue so the WM's FocusIn acknowledgment is
+            # processed before the dialog becomes interactive.  Without this the
+            # WM still considers the dialog unfocused and intercepts the first tap.
             dialog.update()
         except tk.TclError:
             pass
