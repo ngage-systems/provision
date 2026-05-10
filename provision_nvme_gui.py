@@ -1412,6 +1412,14 @@ class ProvisioningWizard(tk.Tk):
                 dialog.focus_force()
             except tk.TclError:
                 pass
+        # Flush the X11 event queue so the WM's FocusIn acknowledgment is
+        # processed before the dialog becomes interactive.  Without this the
+        # WM still considers the dialog unfocused and intercepts the first tap
+        # to establish focus itself, silently eating it.
+        try:
+            dialog.update()
+        except tk.TclError:
+            pass
 
     def _fit_modal_to_screen(self, dialog, max_width=900, min_height=200):
         """Size and center a modal so all packed content fits (avoids clipping buttons on small displays)."""
