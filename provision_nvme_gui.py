@@ -1271,6 +1271,15 @@ class ProvisioningWizard(tk.Tk):
     # Layout: content expands, the touch keyboard appears above nav, and
     # navigation stays pinned to the bottom of the window.
     # ------------------------------------------------------------------
+    def _restore_nav_z_order(self):
+        try:
+            self.content.lower(self.nav)
+            self.nav.lift()
+            if self.keyboard.winfo_ismapped():
+                self.keyboard.lift(self.nav)
+        except tk.TclError:
+            pass
+
     def _build_layout(self):
         self.keyboard = tk.Frame(
             self, bg=ENTRY_BG, padx=KEYBOARD_FRAME_PADX, pady=KEYBOARD_FRAME_PADY
@@ -1308,6 +1317,8 @@ class ProvisioningWizard(tk.Tk):
         # Content is packed after nav; when vertical space is tight, the expanding
         # content can paint over the nav bar. Keep the content window below nav.
         self.content.lower(self.nav)
+        self.content.bind("<Configure>", lambda _e: self._restore_nav_z_order(), add="+")
+        self.nav.bind("<Configure>", lambda _e: self._restore_nav_z_order(), add="+")
 
     def _make_button(self, parent, text, command, primary=False):
         bg = ACCENT if primary else ENTRY_BG
@@ -1466,15 +1477,12 @@ class ProvisioningWizard(tk.Tk):
         self._focused_entry = entry
         if not self.keyboard.winfo_ismapped():
             self.keyboard.pack(side="bottom", fill="x", before=self.nav)
-            self.keyboard.lift(self.nav)
+            self._restore_nav_z_order()
 
     def _hide_touch_keyboard(self):
         if self.keyboard.winfo_manager():
             self.keyboard.pack_forget()
-        try:
-            self.nav.lift()
-        except tk.TclError:
-            pass
+        self._restore_nav_z_order()
 
     def _keyboard_toggle_shift(self):
         self._keyboard_shift = not self._keyboard_shift
@@ -1530,10 +1538,8 @@ class ProvisioningWizard(tk.Tk):
         else:
             self.btn_recheck_accessories.pack_forget()
         self.steps[self.step_index]()
-        try:
-            self.nav.lift()
-        except tk.TclError:
-            pass
+        self._restore_nav_z_order()
+        self.after(0, self._restore_nav_z_order)
 
     def _next_index(self, index):
         next_index = index + 1
@@ -1594,10 +1600,7 @@ class ProvisioningWizard(tk.Tk):
             dialog.grab_release()
             dialog.destroy()
             self.update_idletasks()
-            try:
-                self.nav.lift()
-            except tk.TclError:
-                pass
+            self._restore_nav_z_order()
 
     def _normalize_wifi_networks_for_export(self):
         raw = self.answers.get("wifi_networks")
@@ -1673,7 +1676,7 @@ class ProvisioningWizard(tk.Tk):
                 self.grab_release()
             except tk.TclError:
                 pass
-            # Run render next tick so nav.lift() wins over pending WM/focus events.
+            # Next tick: clean layout/event state; render ends with _restore_nav_z_order.
             self.after(0, self._render_current_step)
             return True
         self._sync_wifi_flat_from_primary_network()
