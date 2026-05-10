@@ -11,7 +11,8 @@ Disable automatic git fetch/merge to refresh this repo before the wizard runs wi
 provision_nvme.sh).
 
 Set ``HB_DEBUG_MODAL_EVENTS=1`` for short ``[pv]`` traces (modal focus/grab, pointer
-hits on Wi‑Fi/install Yes/No, ``next``, choices).
+hits on Wi‑Fi/install Yes/No, ``next``, choices). Includes ``focusin dialog`` and
+``fin retry`` after the deferred focus pass.
 """
 
 import argparse
@@ -84,6 +85,8 @@ KEYBOARD_CTRL_SMALL_W = _keyboard_scale(7)
 
 # Shift yes/no confirmation modals upward so their buttons stay clear of the main wizard nav row.
 MODAL_NAV_VERTICAL_BIAS_PX = 100
+# Deferred focus pass after map (ConfigureNotify / Wayland surface readiness).
+MODAL_FOCUS_RETRY_MS = 100
 
 DEFAULT_WIFI_COUNTRY = "US"
 DEFAULT_TIMEZONE = "America/New_York"
@@ -1451,8 +1454,27 @@ class ProvisioningWizard(tk.Tk):
                 title = "?"
             self._debug_modal_event(f"fin open tit={title!r}")
 
+        parent_restore_needed = False
         if parent is not None:
             dialog.transient(parent)
+            try:
+                parent.attributes("-disabled", True)
+                parent_restore_needed = True
+            except tk.TclError:
+                pass
+
+            if parent_restore_needed:
+
+                def on_dialog_destroy(event):
+                    if event.widget is not dialog:
+                        return
+                    try:
+                        parent.attributes("-disabled", False)
+                    except tk.TclError:
+                        pass
+
+                dialog.bind("<Destroy>", on_dialog_destroy, add="+")
+
         if geometry is not None:
             dialog.geometry(geometry)
         dialog.update_idletasks()
@@ -1465,9 +1487,22 @@ class ProvisioningWizard(tk.Tk):
             dialog.wait_visibility()
         except tk.TclError:
             pass
-        grab_mode = "-"
+
         try:
             dialog.lift()
+        except tk.TclError:
+            pass
+
+        # Focus before grab: some WMs behave better when keyboard focus is established first.
+        try:
+            dialog.focus_force()
+            dialog.update()
+            dialog.focus_force()
+        except tk.TclError:
+            pass
+
+        grab_mode = "-"
+        try:
             grab_global = getattr(dialog, "grab_set_global", None)
             if callable(grab_global):
                 try:
@@ -1483,27 +1518,21 @@ class ProvisioningWizard(tk.Tk):
             grab_mode = "!"
         if dbg:
             self._debug_modal_event(f"fin grab={grab_mode}")
-        # Brief topmost flash helps some WMs stack the modal above the parent nav so the
-        # first tap does not leak through to widgets underneath (e.g. primary Next button).
+
+        # Keep topmost for the modal lifetime so the WM does not leave the surface needing a
+        # separate activation click (cleared when the Toplevel is destroyed).
         try:
             dialog.attributes("-topmost", True)
             dialog.update_idletasks()
             dialog.update()
-            dialog.attributes("-topmost", False)
         except tk.TclError:
             pass
         if dbg:
-            self._debug_modal_event("fin topmost off")
+            self._debug_modal_event("fin topmost on")
+
         try:
             dialog.focus_force()
-            # Flush the X11 event queue so the WM's FocusIn acknowledgment is
-            # processed before the dialog becomes interactive.  Without this the
-            # WM still considers the dialog unfocused and intercepts the first tap.
             dialog.update()
-            # Re-establish focus: update() can process WM ConfigureNotify events
-            # (e.g. when the WM repositions a dialog with a fixed geometry) that
-            # hand focus back to the parent.  A second focus_force() after the
-            # flush wins the focus back cleanly.
             dialog.focus_force()
         except tk.TclError:
             pass
@@ -1513,6 +1542,7 @@ class ProvisioningWizard(tk.Tk):
             except tk.TclError:
                 fg = None
             self._debug_modal_event(f"fin ff fg={self._widget_dbg(fg)}")
+            dialog.bind("<FocusIn>", lambda _e: self._debug_modal_event("focusin dialog"), add="+")
 
         if focus_widget is not None:
 
@@ -1520,8 +1550,6 @@ class ProvisioningWizard(tk.Tk):
                 try:
                     if not focus_widget.winfo_exists():
                         return
-                    # Scope takefocus=1 to modal default actions only; keeps tab focus sane and
-                    # lets the WM acknowledge a real focus target so the first tap activates Yes.
                     focus_widget.configure(takefocus=1)
                     focus_widget.focus_set()
                     if dbg:
@@ -1536,6 +1564,32 @@ class ProvisioningWizard(tk.Tk):
                     pass
 
             dialog.after_idle(apply_default_focus)
+
+        def delayed_focus_retry():
+            try:
+                if not dialog.winfo_exists():
+                    return
+                dialog.lift()
+                dialog.focus_force()
+                dialog.update()
+                if focus_widget is not None and focus_widget.winfo_exists():
+                    focus_widget.configure(takefocus=1)
+                    focus_widget.focus_set()
+                if dbg:
+                    try:
+                        fg = dialog.focus_get()
+                    except tk.TclError:
+                        fg = None
+                    btn = (
+                        self._widget_dbg(focus_widget)
+                        if focus_widget is not None and focus_widget.winfo_exists()
+                        else "-"
+                    )
+                    self._debug_modal_event(f"fin retry fg={self._widget_dbg(fg)} btn={btn}")
+            except tk.TclError:
+                pass
+
+        dialog.after(MODAL_FOCUS_RETRY_MS, delayed_focus_retry)
 
     def _fit_modal_to_screen(self, dialog, max_width=900, min_height=200, vertical_bias_px=0):
         """Size and center a modal so all packed content fits (avoids clipping buttons on small displays)."""
