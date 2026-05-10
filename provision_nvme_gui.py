@@ -83,8 +83,6 @@ KEYBOARD_CTRL_SPACE_W = _keyboard_scale(18)
 KEYBOARD_CTRL_BACKSPACE_W = _keyboard_scale(10)
 KEYBOARD_CTRL_SMALL_W = _keyboard_scale(7)
 
-# Shift yes/no confirmation modals upward so their buttons stay clear of the main wizard nav row.
-MODAL_NAV_VERTICAL_BIAS_PX = 100
 # Deferred focus pass after map (ConfigureNotify / Wayland surface readiness).
 MODAL_FOCUS_RETRY_MS = 100
 
@@ -1591,6 +1589,89 @@ class ProvisioningWizard(tk.Tk):
 
         dialog.after(MODAL_FOCUS_RETRY_MS, delayed_focus_retry)
 
+    def _inline_yes_no_modal(self, *, title, body, trace_prefix, choose_debug_label):
+        """Yes/No confirmation drawn inside the main window (no separate Toplevel).
+
+        Avoids WM/compositor behavior where the first tap only activates a new window and
+        does not deliver Button events to widgets until the second tap.
+        """
+        done = tk.BooleanVar(value=False)
+        chosen = {"yes": False}
+
+        overlay = tk.Frame(self, bg=BG)
+        overlay.place(x=0, y=0, relwidth=1, relheight=1)
+        overlay.lift()
+
+        shell = tk.Frame(overlay, bg=BG)
+        shell.place(relx=0.5, rely=0.42, anchor="center")
+
+        tk.Label(shell, text=title, bg=BG, fg=FG, font=FONT_TITLE).pack(
+            anchor="w", padx=40, pady=(12, 15)
+        )
+        tk.Label(
+            shell,
+            text=body,
+            bg=BG,
+            fg=FG,
+            font=FONT_LABEL,
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", padx=40, pady=(0, 28))
+
+        buttons = tk.Frame(shell, bg=BG)
+        buttons.pack(fill="x", padx=40, pady=(0, 14))
+
+        def finish(yes):
+            self._debug_modal_event(f"{choose_debug_label} pick={'yes' if yes else 'no'}")
+            chosen["yes"] = yes
+            try:
+                self.grab_release()
+            except tk.TclError:
+                pass
+            overlay.destroy()
+            done.set(True)
+
+        no_btn = self._make_button(
+            buttons,
+            "No",
+            lambda: finish(False),
+            pointer_trace_tag=f"{trace_prefix}:no",
+        )
+        no_btn.config(padx=60, pady=24, width=8)
+        no_btn.pack(side="left")
+        yes_btn = self._make_button(
+            buttons,
+            "Yes",
+            lambda: finish(True),
+            primary=True,
+            pointer_trace_tag=f"{trace_prefix}:yes",
+        )
+        yes_btn.config(padx=60, pady=24, width=8)
+        yes_btn.pack(side="right")
+
+        overlay.bind("<Escape>", lambda _e: finish(False))
+
+        overlay.update_idletasks()
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.focus_force()
+
+        def focus_yes():
+            try:
+                yes_btn.configure(takefocus=1)
+                yes_btn.focus_set()
+            except tk.TclError:
+                pass
+
+        self.after_idle(focus_yes)
+        self.after(MODAL_FOCUS_RETRY_MS, focus_yes)
+
+        self.wait_variable(done)
+        self.focus_force()
+        return chosen["yes"]
+
     def _fit_modal_to_screen(self, dialog, max_width=900, min_height=200, vertical_bias_px=0):
         """Size and center a modal so all packed content fits (avoids clipping buttons on small displays)."""
         dialog.update_idletasks()
@@ -1887,121 +1968,32 @@ class ProvisioningWizard(tk.Tk):
         self.withdraw()
 
     def _ask_add_another_wifi_network(self):
-        """Styled modal matching the wizard. Returns True to add another network."""
-        dialog = tk.Toplevel(self)
-        dialog.title("Add another network?")
-        dialog.configure(bg=BG)
-        result = tk.StringVar(value="no")
-
-        def choose(value):
-            self._debug_modal_event(f"wifi pick={value!r}")
-            result.set(value)
-            dialog.destroy()
-
-        tk.Label(
-            dialog,
-            text="Add another Wi-Fi network?",
-            bg=BG,
-            fg=FG,
-            font=FONT_TITLE,
-        ).pack(anchor="w", padx=40, pady=(30, 15))
-        tk.Label(
-            dialog,
-            text=(
+        """Returns True to add another Wi‑Fi network (inline overlay; see _inline_yes_no_modal)."""
+        return self._inline_yes_no_modal(
+            title="Add another Wi-Fi network?",
+            body=(
                 "Each saved network will be written to the new system so it can connect "
                 "wherever those networks are in range.\n\n"
                 "Do you want to add another Wi-Fi network now?"
             ),
-            bg=BG,
-            fg=FG,
-            font=FONT_LABEL,
-            wraplength=620,
-            justify="left",
-        ).pack(anchor="w", padx=40, pady=(0, 30))
-
-        buttons = tk.Frame(dialog, bg=BG)
-        buttons.pack(fill="x", padx=40, pady=(0, 35))
-        no_button = self._make_button(buttons, "No", lambda: choose("no"), pointer_trace_tag="w:no")
-        no_button.config(padx=60, pady=24, width=8)
-        no_button.pack(side="left")
-        yes_button = self._make_button(
-            buttons, "Yes", lambda: choose("yes"), primary=True, pointer_trace_tag="w:yes"
+            trace_prefix="w",
+            choose_debug_label="wifi",
         )
-        yes_button.config(padx=60, pady=24, width=8)
-        yes_button.pack(side="right")
-
-        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("no"))
-        self._fit_modal_to_screen(
-            dialog,
-            max_width=720,
-            min_height=220,
-            vertical_bias_px=-MODAL_NAV_VERTICAL_BIAS_PX,
-        )
-        self._finalize_modal(dialog, focus_widget=yes_button, parent=self, geometry=None)
-        dialog.wait_window()
-        try:
-            self.grab_release()
-        except tk.TclError:
-            pass
-        self.focus_force()
-        return result.get() == "yes"
 
     def _confirm_destructive_provision(self):
-        dialog = tk.Toplevel(self)
-        dialog.title("Install new system?")
-        dialog.configure(bg=BG)
-
-        result = tk.BooleanVar(value=False)
-
-        def choose(value):
-            self._debug_modal_event(f"install pick={value}")
-            result.set(value)
-            dialog.destroy()
-
-        tk.Label(
-            dialog,
-            text="Install new system?",
-            bg=BG,
-            fg=FG,
-            font=FONT_TITLE,
-        ).pack(anchor="w", padx=40, pady=(30, 15))
-        tk.Label(
-            dialog,
-            text=(
+        ok = self._inline_yes_no_modal(
+            title="Install new system?",
+            body=(
                 "This will erase the device's internal storage drive and install a fresh system on it. "
                 "That erase step is expected: it clears the target drive so the new setup can be written.\n\n"
                 "If this is a new system, there is probably nothing on that drive to lose. "
                 "If the drive already has data you care about, stop now because that data will be lost.\n\n"
                 "Start provisioning now?"
             ),
-            bg=BG,
-            fg=FG,
-            font=FONT_LABEL,
-            wraplength=620,
-            justify="left",
-        ).pack(anchor="w", padx=40, pady=(0, 30))
-
-        buttons = tk.Frame(dialog, bg=BG)
-        buttons.pack(fill="x", padx=40, pady=(0, 35))
-        no_button = self._make_button(buttons, "No", lambda: choose(False), pointer_trace_tag="i:no")
-        no_button.config(padx=60, pady=24, width=8)
-        no_button.pack(side="left")
-        yes_button = self._make_button(
-            buttons, "Yes", lambda: choose(True), primary=True, pointer_trace_tag="i:yes"
+            trace_prefix="i",
+            choose_debug_label="install",
         )
-        yes_button.config(padx=60, pady=24, width=8)
-        yes_button.pack(side="right")
-
-        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
-        dialog.update_idletasks()
-        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
-        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 2)
-        y = max(16, y - MODAL_NAV_VERTICAL_BIAS_PX)
-        self._finalize_modal(dialog, focus_widget=yes_button, parent=self, geometry=f"+{x}+{y}")
-        dialog.wait_window()
-        self.focus_force()
-
-        if not result.get():
+        if not ok:
             return False
 
         self.answers["confirm_erase"] = "ERASE"
