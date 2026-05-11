@@ -1445,7 +1445,7 @@ class ProvisioningWizard(tk.Tk):
         boolean_var.trace_add("write", lambda *_a: redraw())
         redraw()
 
-        canvas.pack(side="left", anchor="n")
+        canvas.pack(side="left", anchor="center")
         lbl = tk.Label(
             row,
             text="This is a hidden network (SSID not broadcast)",
@@ -1458,7 +1458,7 @@ class ProvisioningWizard(tk.Tk):
             cursor="hand2",
         )
         lbl.bind("<Button-1>", toggle)
-        lbl.pack(side="left", fill="x", expand=True, padx=(8, 0), anchor="nw")
+        lbl.pack(side="left", fill="x", expand=True, padx=(8, 0), anchor="w")
         row.pack(fill="x", pady=(16, 16))
 
     def _step_index_for_name(self, step_name):
