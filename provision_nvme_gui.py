@@ -334,14 +334,6 @@ def _signal_dbm_to_qualitative(dbm):
     return "Weak"
 
 
-def _freq_mhz_to_band(mhz):
-    if mhz < 2500:
-        return "2.4 GHz"
-    if mhz < 5925:
-        return "5 GHz"
-    return "6 GHz"
-
-
 def _shorten_wifi_security(text, max_len=24):
     t = (text or "").strip()
     if not t or t == "--":
@@ -375,7 +367,6 @@ def _wifi_rows_from_plain_ssids(ssids):
             {
                 "ssid": s,
                 "signal_label": "Unknown",
-                "band": "—",
                 "security": "—",
                 "_sort": -1.0,
             }
@@ -390,10 +381,10 @@ def _parse_nmcli_wifi_rows(lines):
         line = line.strip()
         if not line:
             continue
-        parts = line.rsplit(":", 3)
-        if len(parts) != 4:
+        parts = line.rsplit(":", 2)
+        if len(parts) != 3:
             continue
-        ssid, sig_s, freq_s, sec = (p.strip() for p in parts)
+        ssid, sig_s, sec = (p.strip() for p in parts)
         if not ssid or ssid == "--":
             continue
         if sig_s in ("", "--"):
@@ -407,18 +398,10 @@ def _parse_nmcli_wifi_rows(lines):
             except ValueError:
                 sig_label = "Unknown"
                 sort_key = 0.0
-        if freq_s in ("", "--"):
-            band = "—"
-        else:
-            try:
-                band = _freq_mhz_to_band(int(freq_s))
-            except ValueError:
-                band = "—"
         rows.append(
             {
                 "ssid": ssid,
                 "signal_label": sig_label,
-                "band": band,
                 "security": _shorten_wifi_security(sec),
                 "_sort": sort_key,
             }
@@ -437,9 +420,7 @@ def _parse_iw_scan_wifi_rows(text):
         ssid = mssid.group(1).strip() if mssid else ""
         if not ssid:
             continue
-        mfreq = re.search(r"\bfreq:\s*(\d+)", block)
         msig = re.search(r"\bsignal:\s*([-0-9.]+)", block)
-        freq = int(mfreq.group(1)) if mfreq else None
         dbm = float(msig.group(1)) if msig else None
         if dbm is not None:
             sig_label = _signal_dbm_to_qualitative(dbm)
@@ -447,13 +428,11 @@ def _parse_iw_scan_wifi_rows(text):
         else:
             sig_label = "Unknown"
             sort_key = 0.0
-        band = _freq_mhz_to_band(freq) if freq is not None else "—"
         sec = _shorten_wifi_security(_iw_security_label(block))
         rows.append(
             {
                 "ssid": ssid,
                 "signal_label": sig_label,
-                "band": band,
                 "security": sec,
                 "_sort": sort_key,
             }
@@ -462,20 +441,19 @@ def _parse_iw_scan_wifi_rows(text):
     return rows
 
 
-def _format_wifi_scan_list_line(row, ssid_width=26):
+def _format_wifi_scan_list_line(row, ssid_width=28):
     ssid = row["ssid"]
     if len(ssid) > ssid_width:
         ssid_disp = ssid[: max(1, ssid_width - 1)] + "…"
     else:
         ssid_disp = ssid
     sig = row["signal_label"][:12]
-    band = row["band"][:10]
-    sec = (row["security"] or "—")[:22]
-    return f"{ssid_disp:{ssid_width}}  {sig:12}  {band:10}  {sec}"
+    sec = (row["security"] or "—")[:32]
+    return f"{ssid_disp:{ssid_width}}  {sig:12}  {sec}"
 
 
-def _format_wifi_scan_list_header(ssid_width=26):
-    return f"{'SSID':{ssid_width}}  {'Signal':12}  {'Band':10}  Security"
+def _format_wifi_scan_list_header(ssid_width=28):
+    return f"{'SSID':{ssid_width}}  {'Signal':12}  Security"
 
 
 def wifi_interfaces_from_nmcli():
@@ -508,7 +486,7 @@ def scan_wifi_ssids(wifi_country=""):
         ssids = parse_ssids(scan_file.read_text(encoding="utf-8").splitlines())
         if ssids:
             rows = _wifi_rows_from_plain_ssids(ssids)
-            return rows, f"Loaded {len(rows)} row(s) from {scan_file} (SSID only; no signal/band data)."
+            return rows, f"Loaded {len(rows)} row(s) from {scan_file} (SSID names only)."
 
     if shutil.which("rfkill"):
         quick_command(["rfkill", "unblock", "wifi"], timeout=5)
@@ -522,7 +500,7 @@ def scan_wifi_ssids(wifi_country=""):
 
     time.sleep(1)
 
-    nmcli_fields = "SSID,SIGNAL,FREQ,SECURITY"
+    nmcli_fields = "SSID,SIGNAL,SECURITY"
     commands = [
         ["nmcli", "--escape", "no", "-t", "-f", nmcli_fields, "dev", "wifi", "list", "--rescan", "yes"],
         ["nmcli", "--escape", "no", "-t", "-f", nmcli_fields, "dev", "wifi", "list"],
@@ -2067,6 +2045,27 @@ class ProvisioningWizard(tk.Tk):
         self.answers["wifi_password"] = first.get("password") or ""
         self.answers["wifi_hidden"] = bool(first.get("hidden"))
 
+    def _restore_wifi_test_state_from_saved_network(self, net):
+        """Rebuild flat wifi_test_* answers from a saved wifi_networks row (for UI/review)."""
+        if not isinstance(net, dict):
+            return
+        ssid = (net.get("ssid") or "").strip()
+        hidden = bool(net.get("hidden"))
+        pw = net.get("password") or ""
+        self.answers["wifi_tested"] = True
+        self.answers["wifi_test_ssid"] = ssid
+        self.answers["wifi_test_hidden"] = hidden
+        self.answers["wifi_test_passed"] = bool(net.get("test_passed", True))
+        self.answers["wifi_internet_reachable"] = bool(net.get("internet_reachable", True))
+        self.answers["wifi_continue_anyway"] = bool(net.get("wifi_continue_anyway", False))
+        self.answers["connectivity_continue_anyway"] = bool(
+            net.get("connectivity_continue_anyway", False)
+        )
+        if self.answers["wifi_test_passed"]:
+            self._last_wifi_test_signature = (ssid, pw, hidden)
+        else:
+            self._last_wifi_test_signature = None
+
     def _clear_draft_wifi_for_additional_network(self):
         self.answers["wifi_ssid"] = ""
         self.answers["wifi_password"] = ""
@@ -2104,7 +2103,19 @@ class ProvisioningWizard(tk.Tk):
                 "This network is already in your saved list. Choose a different SSID or go Back.",
             )
             return False
-        nets.append({"ssid": ssid, "password": pw, "hidden": hidden})
+        nets.append(
+            {
+                "ssid": ssid,
+                "password": pw,
+                "hidden": hidden,
+                "test_passed": bool(self.answers.get("wifi_test_passed")),
+                "internet_reachable": bool(self.answers.get("wifi_internet_reachable")),
+                "wifi_continue_anyway": bool(self.answers.get("wifi_continue_anyway")),
+                "connectivity_continue_anyway": bool(
+                    self.answers.get("connectivity_continue_anyway")
+                ),
+            }
+        )
         return True
 
     def _maybe_branch_wifi_network_collection_after_password(self):
@@ -3188,10 +3199,17 @@ class ProvisioningWizard(tk.Tk):
     def _step_wifi_ssid_pick(self):
         self._wifi_ssid_pick_listbox = None
         self._add_title("Choose Wi-Fi network")
-        self._add_label(
-            "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
-            "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list."
-        )
+        if self._wifi_saved_networks_list():
+            self._add_label(
+                "Select another network and tap Next to add it, or tap Next with nothing selected to "
+                "continue using the Wi-Fi networks you already saved. "
+                "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list."
+            )
+        else:
+            self._add_label(
+                "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
+                "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list."
+            )
         self._refresh_wifi_scan(force=False)
 
         scan_row = tk.Frame(self.content, bg=BG)
@@ -3713,12 +3731,15 @@ class ProvisioningWizard(tk.Tk):
             self.answers["wifi_hidden"] = False
             self._wifi_ssid_manual_flow = False
             if not value:
-                if self.answers.get("wifi_networks"):
-                    self._show_styled_error_modal(
-                        "Wi-Fi required",
-                        "Select a Wi-Fi network from the list, use “Specify SSID not on this list”, or go Back.",
-                    )
-                    return False
+                nets = self.answers.get("wifi_networks")
+                if isinstance(nets, list) and nets:
+                    # Done adding networks: keep list for export; leave draft SSID empty so
+                    # _next_index skips the password step (same as Ethernet-only path).
+                    self.answers["wifi_ssid"] = ""
+                    self.answers["wifi_password"] = ""
+                    self.answers["wifi_hidden"] = False
+                    self._restore_wifi_test_state_from_saved_network(nets[0])
+                    return True
                 self.answers["wifi_password"] = ""
                 self.answers["wifi_hidden"] = False
                 self.answers["wifi_tested"] = False
