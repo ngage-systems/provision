@@ -1197,6 +1197,7 @@ class ProvisioningWizard(tk.Tk):
             self._step_hostname,
             self._step_username,
             self._step_password,
+            self._step_login_credentials_reminder,
             self._step_review,
         ]
         self.step_index = 0
@@ -3100,6 +3101,20 @@ class ProvisioningWizard(tk.Tk):
         self._password_var, entry = self._add_entry(self.answers.get("password", ""))
         entry.focus_set()
 
+    def _step_login_credentials_reminder(self):
+        self._add_title("Save these login details")
+        self._add_label(
+            "The username and password below are for this device's login account: local sign-in and SSH."
+        )
+        self._add_label(
+            "Under normal circumstances you may not need them often, but keep a secure record of them. "
+            "They matter for troubleshooting and for re-provisioning this device if that becomes necessary."
+        )
+        username = self.answers.get("username") or "(not set)"
+        password = self.answers.get("password") or "(not set)"
+        self._add_label(f"Username: {username}", fg=ACCENT)
+        self._add_label(f"Password: {password}", fg=ACCENT)
+
     def _step_monitor_width(self):
         self._add_title("Physical screen width")
         self._add_label("Enter the visible screen width in centimeters.")
@@ -3670,6 +3685,9 @@ class ProvisioningWizard(tk.Tk):
                 self._show_styled_error_modal("Required", "Empty password is not allowed.")
                 return False
             self.answers["password"] = value
+
+        elif step_name == "_step_login_credentials_reminder":
+            return True
 
         elif step_name == "_step_monitor_width":
             return self._validate_float_step("monitor_width_cm", self._monitor_width_var)
