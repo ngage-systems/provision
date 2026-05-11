@@ -61,7 +61,7 @@ FONT_REVIEW = ("DejaVu Sans", 12)
 FONT_INPUT = ("DejaVu Sans", 16)
 FONT_WIFI_LIST = ("DejaVu Sans Mono", 13)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
-FONT_WIFI_HIDDEN_CHECK = ("DejaVu Sans", FONT_LABEL[1] * 3)
+FONT_WIFI_HIDDEN_CHECK = ("DejaVu Sans", FONT_LABEL[1] * 3 // 2)
 
 
 def _keyboard_scale(n):
