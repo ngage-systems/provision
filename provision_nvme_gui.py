@@ -3231,7 +3231,17 @@ class ProvisioningWizard(tk.Tk):
 
         self._wifi_ssid_pick_rows = []
         if self.wifi_scan_rows:
-            self._wifi_ssid_pick_rows = list(self.wifi_scan_rows)
+            saved_ssids = self._wifi_already_saved_ssid_set()
+            if saved_ssids:
+                self._wifi_ssid_pick_rows = [
+                    r
+                    for r in self.wifi_scan_rows
+                    if (r.get("ssid") or "").strip() not in saved_ssids
+                ]
+            else:
+                self._wifi_ssid_pick_rows = list(self.wifi_scan_rows)
+
+        if self._wifi_ssid_pick_rows:
             display_lines = [_format_wifi_scan_list_line(r) for r in self._wifi_ssid_pick_rows]
             selected_ssid = self.answers.get("wifi_ssid", "")
             pick_idx = None
@@ -3260,6 +3270,21 @@ class ProvisioningWizard(tk.Tk):
             )
             self._wifi_ssid_pick_listbox = listbox
             listbox.bind("<<ListboxSelect>>", self._on_ssid_list_select, add="+")
+        elif self.wifi_scan_rows:
+            tk.Label(
+                list_outer,
+                text=(
+                    "Every network in the current scan is already in your saved list. "
+                    "Tap Rescan Wi-Fi, specify an SSID below, or tap Next with nothing selected to continue."
+                ),
+                bg=BG,
+                fg=MUTED,
+                font=FONT_LABEL,
+                justify="left",
+                wraplength=560,
+            ).pack(anchor="w", pady=(0, 8))
+            self._ssid_list_var = tk.StringVar(value="")
+            self._wifi_ssid_pick_listbox = None
         else:
             tk.Label(
                 list_outer,
@@ -3567,6 +3592,13 @@ class ProvisioningWizard(tk.Tk):
         if isinstance(nets, list) and nets:
             return nets
         return []
+
+    def _wifi_already_saved_ssid_set(self):
+        return {
+            (n.get("ssid") or "").strip()
+            for n in self._wifi_saved_networks_list()
+            if isinstance(n, dict) and (n.get("ssid") or "").strip()
+        }
 
     def _wifi_review_saved_ssids_text(self):
         nets = self._wifi_saved_networks_list()
