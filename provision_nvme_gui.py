@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import uuid
 
 try:
@@ -62,6 +62,7 @@ FONT_INPUT = ("DejaVu Sans", 16)
 FONT_WIFI_LIST = ("DejaVu Sans Mono", 13)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
 FONT_WIFI_HIDDEN_CHECK = ("DejaVu Sans", FONT_LABEL[1] * 3 // 2)
+WIFI_HIDDEN_CHECK_INDICATOR_PX = 30
 
 
 def _keyboard_scale(n):
@@ -1287,6 +1288,8 @@ class ProvisioningWizard(tk.Tk):
         self.title("Device Provisioning")
         self.configure(bg=BG)
 
+        self._configure_wifi_hidden_pick_checkbox_style()
+
         self._configure_window_size()
 
         self.output_path = output_path
@@ -1360,6 +1363,29 @@ class ProvisioningWizard(tk.Tk):
         height = min(800, max(420, screen_h - margin_y))
         self.geometry(f"{width}x{height}+10+10")
         self.minsize(min(760, width), min(420, height))
+
+    def _configure_wifi_hidden_pick_checkbox_style(self):
+        """Larger indicator than default tk.Checkbutton (indicator size is independent of label font)."""
+        name = "WifiHidden.TCheckbutton"
+        self._wifi_hidden_pick_style = name
+        sty = ttk.Style(self)
+        cfg = {
+            "font": FONT_WIFI_HIDDEN_CHECK,
+            "foreground": FG,
+            "background": BG,
+        }
+        try:
+            sty.configure(name, indicatorsize=WIFI_HIDDEN_CHECK_INDICATOR_PX, **cfg)
+        except tk.TclError:
+            sty.configure(name, **cfg)
+        try:
+            sty.map(
+                name,
+                background=[("active", BG), ("selected", BG), ("!disabled", BG)],
+                foreground=[("disabled", MUTED), ("!disabled", FG)],
+            )
+        except tk.TclError:
+            pass
 
     def _step_index_for_name(self, step_name):
         for index, step in enumerate(self.steps):
@@ -3302,16 +3328,11 @@ class ProvisioningWizard(tk.Tk):
         self._wifi_pick_hidden_var = tk.BooleanVar(value=bool(self.answers.get("wifi_hidden")))
         hid_pick_row = tk.Frame(list_outer, bg=BG)
         hid_pick_row.pack(fill="x", pady=(10, 0))
-        tk.Checkbutton(
+        ttk.Checkbutton(
             hid_pick_row,
             text="This is a hidden network (SSID not broadcast)",
             variable=self._wifi_pick_hidden_var,
-            bg=BG,
-            fg=FG,
-            selectcolor=ENTRY_BG,
-            activebackground=BG,
-            activeforeground=FG,
-            font=FONT_WIFI_HIDDEN_CHECK,
+            style=self._wifi_hidden_pick_style,
         ).pack(anchor="w", pady=(16, 16))
 
         self._make_button(
