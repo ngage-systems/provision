@@ -3298,6 +3298,21 @@ class ProvisioningWizard(tk.Tk):
             self._ssid_list_var = tk.StringVar(value="")
             self._wifi_ssid_pick_listbox = None
 
+        self._wifi_pick_hidden_var = tk.BooleanVar(value=bool(self.answers.get("wifi_hidden")))
+        hid_pick_row = tk.Frame(list_outer, bg=BG)
+        hid_pick_row.pack(fill="x", pady=(10, 0))
+        tk.Checkbutton(
+            hid_pick_row,
+            text="Hidden network (SSID not broadcast)",
+            variable=self._wifi_pick_hidden_var,
+            bg=BG,
+            fg=FG,
+            selectcolor=ENTRY_BG,
+            activebackground=BG,
+            activeforeground=FG,
+            font=FONT_LABEL,
+        ).pack(anchor="w")
+
         self._make_button(
             list_outer,
             "Specify SSID not on this list",
@@ -3743,7 +3758,8 @@ class ProvisioningWizard(tk.Tk):
                     idx = sel[0]
                     if 0 <= idx < len(rows):
                         value = (rows[idx].get("ssid") or "").strip()
-            hidden = False
+            pick_hid = getattr(self, "_wifi_pick_hidden_var", None)
+            hidden = bool(pick_hid.get()) if (value and pick_hid) else False
             if "\n" in value or "\r" in value:
                 self._show_styled_error_modal("Invalid", "Wi-Fi SSID cannot contain newline characters.")
                 return False
@@ -3760,7 +3776,7 @@ class ProvisioningWizard(tk.Tk):
                 self.answers.pop("connectivity_continue_anyway", None)
                 self.answers.pop("connectivity_checks_last_report", None)
             self.answers["wifi_ssid"] = value
-            self.answers["wifi_hidden"] = False
+            self.answers["wifi_hidden"] = hidden
             self._wifi_ssid_manual_flow = False
             if not value:
                 nets = self.answers.get("wifi_networks")
