@@ -1151,6 +1151,7 @@ class ProvisioningWizard(tk.Tk):
         self.output_path = output_path
         self._self_update_retry_needed = False
         self._loaded_resume_state = False
+        self._post_wifi_add_another_pending = False
 
         self.defaults_path = Path(os.environ.get("DEVICE_DEFAULTS_FILE", script_defaults_file()))
         self.config = load_defaults_config(self.defaults_path)
@@ -1242,6 +1243,7 @@ class ProvisioningWizard(tk.Tk):
             self.answers["wifi_networks"] = []
         self.step_index = target_index
         self._wifi_ssid_manual_flow = target_step == "_step_wifi_ssid_manual"
+        self._post_wifi_add_another_pending = bool(payload.get("post_wifi_add_another_pending"))
         self._loaded_resume_state = True
 
         ssid = self.answers.get("wifi_ssid", "")
@@ -1262,7 +1264,7 @@ class ProvisioningWizard(tk.Tk):
             return ""
         return self.steps[self.step_index].__name__
 
-    def _save_resume_state(self):
+    def _save_resume_state(self, *, post_wifi_add_another_pending=False):
         target_step = self._current_resume_target_step_name()
         if not target_step:
             return
@@ -1272,6 +1274,8 @@ class ProvisioningWizard(tk.Tk):
             "target_step": target_step,
             "answers": self.answers,
         }
+        if post_wifi_add_another_pending:
+            payload["post_wifi_add_another_pending"] = True
         write_resume_state(payload)
         print(f"Resume state: saved wizard state for {target_step}.")
 
@@ -1909,9 +1913,12 @@ class ProvisioningWizard(tk.Tk):
         self._last_wifi_test_signature = None
         self._wifi_ssid_manual_flow = False
 
-    def _maybe_branch_wifi_network_collection_after_password(self):
-        if self.steps[self.step_index].__name__ != "_step_wifi_password":
-            return False
+    def _append_current_draft_wifi_to_saved_networks(self):
+        """Append draft wifi_ssid/password/hidden to wifi_networks if not duplicate.
+
+        Returns True if a new row was appended. On duplicate SSID, shows the same
+        error modal as the post-password branch and returns False.
+        """
         ssid = (self.answers.get("wifi_ssid") or "").strip()
         if not ssid:
             return False
@@ -1926,8 +1933,18 @@ class ProvisioningWizard(tk.Tk):
                 "Duplicate Wi-Fi",
                 "This network is already in your saved list. Choose a different SSID or go Back.",
             )
-            return True
+            return False
         nets.append({"ssid": ssid, "password": pw, "hidden": hidden})
+        return True
+
+    def _maybe_branch_wifi_network_collection_after_password(self):
+        if self.steps[self.step_index].__name__ != "_step_wifi_password":
+            return False
+        ssid = (self.answers.get("wifi_ssid") or "").strip()
+        if not ssid:
+            return False
+        if not self._append_current_draft_wifi_to_saved_networks():
+            return True
         if self._ask_add_another_wifi_network():
             self._clear_draft_wifi_for_additional_network()
             self.step_index = self.steps.index(self._step_wifi_ssid_pick)
@@ -2803,8 +2820,17 @@ class ProvisioningWizard(tk.Tk):
         self._self_update_retry_needed = False
         print(f"Self-update: {result['message']}")
         if result["updated"]:
+            post_wifi_add_another_pending = False
+            if (
+                self.steps[self.step_index].__name__ == "_step_wifi_password"
+                and (self.answers.get("wifi_ssid") or "").strip()
+            ):
+                if self._append_current_draft_wifi_to_saved_networks():
+                    post_wifi_add_another_pending = True
             try:
-                self._save_resume_state()
+                self._save_resume_state(
+                    post_wifi_add_another_pending=post_wifi_add_another_pending
+                )
             except (OSError, TypeError) as exc:
                 print(f"Resume state: could not save before restart: {exc}")
                 self._show_styled_warning_modal(
@@ -3060,6 +3086,23 @@ class ProvisioningWizard(tk.Tk):
         self.btn_next.focus_set()
 
     def _step_wifi_password(self):
+        if self._post_wifi_add_another_pending:
+            self._post_wifi_add_another_pending = False
+            delete_resume_state()
+            pwd_idx = self.steps.index(self._step_wifi_password)
+            if self._ask_add_another_wifi_network():
+                self._clear_draft_wifi_for_additional_network()
+                self.step_index = self.steps.index(self._step_wifi_ssid_pick)
+                try:
+                    self.grab_release()
+                except tk.TclError:
+                    pass
+                self.after(0, self._render_current_step)
+            else:
+                self._sync_wifi_flat_from_primary_network()
+                self.step_index = self._next_index(pwd_idx)
+                self.after(0, self._render_current_step)
+            return
         ssid = self.answers.get("wifi_ssid", "")
         self._add_title("Wi-Fi password")
         self._add_label(f"Password for {ssid} (shown). The connection will be tested before continuing.")
