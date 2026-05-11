@@ -62,7 +62,8 @@ FONT_INPUT = ("DejaVu Sans", 16)
 FONT_WIFI_LIST = ("DejaVu Sans Mono", 13)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
 FONT_WIFI_HIDDEN_CHECK = ("DejaVu Sans", FONT_LABEL[1] * 3 // 2)
-WIFI_HIDDEN_CHECK_INDICATOR_PX = 30
+# SSID-pick "hidden network" canvas toggle; inner square edge length (2× former ttk indicator).
+WIFI_HIDDEN_CHECK_INDICATOR_PX = 60
 
 
 def _keyboard_scale(n):
@@ -1365,10 +1366,14 @@ class ProvisioningWizard(tk.Tk):
         self.minsize(min(760, width), min(420, height))
 
     def _configure_wifi_hidden_pick_checkbox_style(self):
-        """Larger indicator than default tk.Checkbutton (indicator size is independent of label font)."""
+        """ttk backup style (clam + indicator colors); SSID pick uses canvas toggle for clarity."""
         name = "WifiHidden.TCheckbutton"
         self._wifi_hidden_pick_style = name
         sty = ttk.Style(self)
+        try:
+            sty.theme_use("clam")
+        except tk.TclError:
+            pass
         cfg = {
             "font": FONT_WIFI_HIDDEN_CHECK,
             "foreground": FG,
@@ -1383,9 +1388,77 @@ class ProvisioningWizard(tk.Tk):
                 name,
                 background=[("active", BG), ("selected", BG), ("!disabled", BG)],
                 foreground=[("disabled", MUTED), ("!disabled", FG)],
+                indicatorcolor=[("selected", SUCCESS), ("!selected", ENTRY_BG)],
             )
         except tk.TclError:
-            pass
+            try:
+                sty.map(
+                    name,
+                    background=[("active", BG), ("selected", BG), ("!disabled", BG)],
+                    foreground=[("disabled", MUTED), ("!disabled", FG)],
+                )
+            except tk.TclError:
+                pass
+
+    def _wifi_hidden_pick_indicator_draw(self, canvas, inner_px, checked):
+        """High-contrast off/on: outlined dark square vs filled SUCCESS with checkmark."""
+        canvas.delete("all")
+        cw = int(canvas["width"])
+        ch = int(canvas["height"])
+        ox = max(0, (cw - inner_px) // 2)
+        oy = max(0, (ch - inner_px) // 2)
+        x1 = ox + inner_px - 1
+        y1 = oy + inner_px - 1
+        if checked:
+            canvas.create_rectangle(ox, oy, x1, y1, fill=SUCCESS, outline=FG, width=3)
+            canvas.create_text(
+                (ox + inner_px // 2, oy + inner_px // 2),
+                text="✓",
+                fill=BG,
+                font=("DejaVu Sans", max(16, inner_px // 2)),
+            )
+        else:
+            canvas.create_rectangle(ox, oy, x1, y1, fill=ENTRY_BG, outline=FG, width=3)
+
+    def _add_wifi_hidden_pick_row(self, parent, boolean_var):
+        """Large canvas checkbox + label; avoids ttk theme ambiguity on checked state."""
+        row = tk.Frame(parent, bg=BG)
+        inner = WIFI_HIDDEN_CHECK_INDICATOR_PX
+        pad = 10
+        side = inner + 2 * pad
+        canvas = tk.Canvas(
+            row,
+            width=side,
+            height=side,
+            bg=BG,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+
+        def redraw(*_args):
+            self._wifi_hidden_pick_indicator_draw(canvas, inner, boolean_var.get())
+
+        def toggle(_event=None):
+            boolean_var.set(not boolean_var.get())
+
+        canvas.bind("<Button-1>", toggle)
+        boolean_var.trace_add("write", lambda *_a: redraw())
+        redraw()
+
+        canvas.pack(side="left", anchor="n")
+        lbl = tk.Label(
+            row,
+            text="This is a hidden network (SSID not broadcast)",
+            font=FONT_WIFI_HIDDEN_CHECK,
+            bg=BG,
+            fg=FG,
+            justify="left",
+            wraplength=560,
+            cursor="hand2",
+        )
+        lbl.bind("<Button-1>", toggle)
+        lbl.pack(side="left", fill="x", expand=True, padx=(14, 0), anchor="w")
+        row.pack(fill="x", pady=(16, 16))
 
     def _step_index_for_name(self, step_name):
         for index, step in enumerate(self.steps):
@@ -3326,14 +3399,7 @@ class ProvisioningWizard(tk.Tk):
             self._wifi_ssid_pick_listbox = None
 
         self._wifi_pick_hidden_var = tk.BooleanVar(value=bool(self.answers.get("wifi_hidden")))
-        hid_pick_row = tk.Frame(list_outer, bg=BG)
-        hid_pick_row.pack(fill="x", pady=(10, 0))
-        ttk.Checkbutton(
-            hid_pick_row,
-            text="This is a hidden network (SSID not broadcast)",
-            variable=self._wifi_pick_hidden_var,
-            style=self._wifi_hidden_pick_style,
-        ).pack(anchor="w", pady=(16, 16))
+        self._add_wifi_hidden_pick_row(list_outer, self._wifi_pick_hidden_var)
 
         self._make_button(
             list_outer,
