@@ -59,6 +59,7 @@ FONT_TITLE = ("DejaVu Sans", 22, "bold")
 FONT_LABEL = ("DejaVu Sans", 14)
 FONT_REVIEW = ("DejaVu Sans", 12)
 FONT_INPUT = ("DejaVu Sans", 16)
+FONT_WIFI_LIST = ("DejaVu Sans Mono", 13)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
 
 
@@ -313,6 +314,170 @@ def parse_ssids(lines):
     return sorted({line.strip() for line in lines if line and line.strip()})
 
 
+def _signal_percent_to_qualitative(pct):
+    if pct >= 80:
+        return "Excellent"
+    if pct >= 60:
+        return "Good"
+    if pct >= 40:
+        return "Fair"
+    return "Weak"
+
+
+def _signal_dbm_to_qualitative(dbm):
+    if dbm >= -55:
+        return "Excellent"
+    if dbm >= -67:
+        return "Good"
+    if dbm >= -77:
+        return "Fair"
+    return "Weak"
+
+
+def _freq_mhz_to_band(mhz):
+    if mhz < 2500:
+        return "2.4 GHz"
+    if mhz < 5925:
+        return "5 GHz"
+    return "6 GHz"
+
+
+def _shorten_wifi_security(text, max_len=24):
+    t = (text or "").strip()
+    if not t or t == "--":
+        return "—"
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1] + "…"
+
+
+def _iw_security_label(block):
+    if re.search(r"Authentication suites:\s*SAE", block):
+        return "WPA3"
+    if re.search(r"\bOWE\b", block):
+        return "OWE"
+    if "RSN" in block or re.search(r"WPA:\s*\* Version", block):
+        return "WPA2"
+    if re.search(r"^WPA:", block, re.MULTILINE):
+        return "WPA"
+    if re.search(r"capability:.*Privacy", block):
+        return "Secured"
+    return "Open"
+
+
+def _wifi_rows_from_plain_ssids(ssids):
+    rows = []
+    for s in ssids:
+        s = (s or "").strip()
+        if not s:
+            continue
+        rows.append(
+            {
+                "ssid": s,
+                "signal_label": "Unknown",
+                "band": "—",
+                "security": "—",
+                "_sort": -1.0,
+            }
+        )
+    rows.sort(key=lambda r: r["ssid"].lower())
+    return rows
+
+
+def _parse_nmcli_wifi_rows(lines):
+    rows = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.rsplit(":", 3)
+        if len(parts) != 4:
+            continue
+        ssid, sig_s, freq_s, sec = (p.strip() for p in parts)
+        if not ssid or ssid == "--":
+            continue
+        if sig_s in ("", "--"):
+            sig_label = "Unknown"
+            sort_key = 0.0
+        else:
+            try:
+                pct = max(0, min(100, int(sig_s)))
+                sig_label = _signal_percent_to_qualitative(pct)
+                sort_key = float(pct)
+            except ValueError:
+                sig_label = "Unknown"
+                sort_key = 0.0
+        if freq_s in ("", "--"):
+            band = "—"
+        else:
+            try:
+                band = _freq_mhz_to_band(int(freq_s))
+            except ValueError:
+                band = "—"
+        rows.append(
+            {
+                "ssid": ssid,
+                "signal_label": sig_label,
+                "band": band,
+                "security": _shorten_wifi_security(sec),
+                "_sort": sort_key,
+            }
+        )
+    rows.sort(key=lambda r: (-r["_sort"], r["ssid"].lower()))
+    return rows
+
+
+def _parse_iw_scan_wifi_rows(text):
+    rows = []
+    for block in re.split(r"\n(?=BSS [0-9a-fA-F:]{17})", text):
+        block = block.strip()
+        if not block.startswith("BSS "):
+            continue
+        mssid = re.search(r"(?m)^\s*SSID:\s*(.*)$", block)
+        ssid = mssid.group(1).strip() if mssid else ""
+        if not ssid:
+            continue
+        mfreq = re.search(r"\bfreq:\s*(\d+)", block)
+        msig = re.search(r"\bsignal:\s*([-0-9.]+)", block)
+        freq = int(mfreq.group(1)) if mfreq else None
+        dbm = float(msig.group(1)) if msig else None
+        if dbm is not None:
+            sig_label = _signal_dbm_to_qualitative(dbm)
+            sort_key = 100.0 + dbm
+        else:
+            sig_label = "Unknown"
+            sort_key = 0.0
+        band = _freq_mhz_to_band(freq) if freq is not None else "—"
+        sec = _shorten_wifi_security(_iw_security_label(block))
+        rows.append(
+            {
+                "ssid": ssid,
+                "signal_label": sig_label,
+                "band": band,
+                "security": sec,
+                "_sort": sort_key,
+            }
+        )
+    rows.sort(key=lambda r: (-r["_sort"], r["ssid"].lower()))
+    return rows
+
+
+def _format_wifi_scan_list_line(row, ssid_width=26):
+    ssid = row["ssid"]
+    if len(ssid) > ssid_width:
+        ssid_disp = ssid[: max(1, ssid_width - 1)] + "…"
+    else:
+        ssid_disp = ssid
+    sig = row["signal_label"][:12]
+    band = row["band"][:10]
+    sec = (row["security"] or "—")[:22]
+    return f"{ssid_disp:{ssid_width}}  {sig:12}  {band:10}  {sec}"
+
+
+def _format_wifi_scan_list_header(ssid_width=26):
+    return f"{'SSID':{ssid_width}}  {'Signal':12}  {'Band':10}  Security"
+
+
 def wifi_interfaces_from_nmcli():
     result = quick_command(["nmcli", "-t", "-f", "DEVICE,TYPE", "dev", "status"], timeout=8)
     if result.returncode != 0:
@@ -342,7 +507,8 @@ def scan_wifi_ssids(wifi_country=""):
     if scan_file.is_file():
         ssids = parse_ssids(scan_file.read_text(encoding="utf-8").splitlines())
         if ssids:
-            return ssids, f"Loaded {len(ssids)} SSID(s) from {scan_file}."
+            rows = _wifi_rows_from_plain_ssids(ssids)
+            return rows, f"Loaded {len(rows)} row(s) from {scan_file} (SSID only; no signal/band data)."
 
     if shutil.which("rfkill"):
         quick_command(["rfkill", "unblock", "wifi"], timeout=5)
@@ -356,17 +522,18 @@ def scan_wifi_ssids(wifi_country=""):
 
     time.sleep(1)
 
+    nmcli_fields = "SSID,SIGNAL,FREQ,SECURITY"
     commands = [
-        ["nmcli", "--escape", "no", "-t", "-f", "SSID", "dev", "wifi", "list", "--rescan", "yes"],
-        ["nmcli", "--escape", "no", "-t", "-f", "SSID", "dev", "wifi", "list"],
+        ["nmcli", "--escape", "no", "-t", "-f", nmcli_fields, "dev", "wifi", "list", "--rescan", "yes"],
+        ["nmcli", "--escape", "no", "-t", "-f", nmcli_fields, "dev", "wifi", "list"],
     ]
     diagnostics = []
     for cmd in commands:
         result = quick_command(cmd, timeout=15)
         if result.returncode == 0:
-            ssids = parse_ssids(result.stdout.splitlines())
-            if ssids:
-                return ssids, f"Found {len(ssids)} SSID(s) with nmcli."
+            rows = _parse_nmcli_wifi_rows(result.stdout.splitlines())
+            if rows:
+                return rows, f"Found {len(rows)} network row(s) with nmcli."
         elif result.stderr.strip():
             diagnostics.append(result.stderr.strip())
 
@@ -378,14 +545,9 @@ def scan_wifi_ssids(wifi_country=""):
                 if result.stderr.strip():
                     diagnostics.append(result.stderr.strip())
                 continue
-            ssids = []
-            for line in result.stdout.splitlines():
-                match = re.match(r"\s*SSID:\s*(.*)$", line)
-                if match:
-                    ssids.append(match.group(1))
-            ssids = parse_ssids(ssids)
-            if ssids:
-                return ssids, f"Found {len(ssids)} SSID(s) with iw on {iface}."
+            rows = _parse_iw_scan_wifi_rows(result.stdout)
+            if rows:
+                return rows, f"Found {len(rows)} network row(s) with iw on {iface}."
 
     if not shutil.which("nmcli") and not shutil.which("iw"):
         return [], "Neither nmcli nor iw is available for Wi-Fi scanning."
@@ -1156,7 +1318,7 @@ class ProvisioningWizard(tk.Tk):
         self.defaults_path = Path(os.environ.get("DEVICE_DEFAULTS_FILE", script_defaults_file()))
         self.config = load_defaults_config(self.defaults_path)
         self.groups = device_groups(self.config)
-        self.wifi_ssids = []
+        self.wifi_scan_rows = []
         self.wifi_scan_message = ""
         self._wifi_ssid_scan_cached_country = None
         self._focused_entry = None
@@ -1862,7 +2024,7 @@ class ProvisioningWizard(tk.Tk):
         )
         try:
             self.update_idletasks()
-            self.wifi_ssids, self.wifi_scan_message = scan_wifi_ssids(country)
+            self.wifi_scan_rows, self.wifi_scan_message = scan_wifi_ssids(country)
         finally:
             dialog.grab_release()
             dialog.destroy()
@@ -2391,6 +2553,8 @@ class ProvisioningWizard(tk.Tk):
         parent=None,
         list_frame_pack=None,
         clamp_height_to_entries=True,
+        font=None,
+        selected_listbox_index=None,
     ):
         var = tk.StringVar(value=selected_value)
         list_parent = parent if parent is not None else self.content
@@ -2403,9 +2567,10 @@ class ProvisioningWizard(tk.Tk):
         else:
             list_height = max(1, max_visible_rows)
 
+        lb_font = font if font is not None else FONT_INPUT
         listbox = tk.Listbox(
             list_frame,
-            font=FONT_INPUT,
+            font=lb_font,
             bg=ENTRY_BG,
             fg=FG,
             selectbackground=ACCENT,
@@ -2425,10 +2590,18 @@ class ProvisioningWizard(tk.Tk):
         scrollbar.pack(side="right", fill="y")
         listbox.config(yscrollcommand=scrollbar.set)
 
-        if selected_value in entries:
+        if (
+            selected_listbox_index is not None
+            and 0 <= selected_listbox_index < len(entries)
+        ):
+            listbox.selection_set(selected_listbox_index)
+            listbox.see(selected_listbox_index)
+            var.set(entries[selected_listbox_index])
+        elif selected_value in entries:
             idx = entries.index(selected_value)
             listbox.selection_set(idx)
             listbox.see(idx)
+            var.set(entries[idx])
 
         def on_select(_event):
             sel = listbox.curselection()
@@ -3017,7 +3190,7 @@ class ProvisioningWizard(tk.Tk):
         self._add_title("Choose Wi-Fi network")
         self._add_label(
             "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
-            "If your network does not appear after a rescan, use the button on the right."
+            "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list."
         )
         self._refresh_wifi_scan(force=False)
 
@@ -3035,26 +3208,43 @@ class ProvisioningWizard(tk.Tk):
                 wraplength=760,
             ).pack(side="left", padx=15)
 
-        list_btn_row = tk.Frame(self.content, bg=BG)
-        list_btn_row.pack(fill="x", pady=(0, 10))
-        list_col = tk.Frame(list_btn_row, bg=BG)
-        list_col.pack(side="left", fill="both", expand=True)
+        list_outer = tk.Frame(self.content, bg=BG)
+        list_outer.pack(fill="both", expand=True, pady=(0, 10))
 
-        if self.wifi_ssids:
-            selected = self.answers.get("wifi_ssid", "")
+        self._wifi_ssid_pick_rows = []
+        if self.wifi_scan_rows:
+            self._wifi_ssid_pick_rows = list(self.wifi_scan_rows)
+            display_lines = [_format_wifi_scan_list_line(r) for r in self._wifi_ssid_pick_rows]
+            selected_ssid = self.answers.get("wifi_ssid", "")
+            pick_idx = None
+            if selected_ssid:
+                for i, row in enumerate(self._wifi_ssid_pick_rows):
+                    if row["ssid"] == selected_ssid:
+                        pick_idx = i
+                        break
+            tk.Label(
+                list_outer,
+                text=_format_wifi_scan_list_header(),
+                bg=BG,
+                fg=MUTED,
+                font=FONT_WIFI_LIST,
+                justify="left",
+            ).pack(anchor="w", pady=(0, 4))
             self._ssid_list_var, listbox = self._add_listbox(
-                self.wifi_ssids,
-                selected,
+                display_lines,
+                "",
                 max_visible_rows=10,
-                parent=list_col,
+                parent=list_outer,
                 list_frame_pack={"fill": "both", "expand": True},
                 clamp_height_to_entries=False,
+                font=FONT_WIFI_LIST,
+                selected_listbox_index=pick_idx,
             )
             self._wifi_ssid_pick_listbox = listbox
             listbox.bind("<<ListboxSelect>>", self._on_ssid_list_select, add="+")
         else:
             tk.Label(
-                list_col,
+                list_outer,
                 text="No scanned Wi-Fi networks found.",
                 bg=BG,
                 fg=MUTED,
@@ -3063,12 +3253,13 @@ class ProvisioningWizard(tk.Tk):
                 wraplength=560,
             ).pack(anchor="w", pady=(0, 8))
             self._ssid_list_var = tk.StringVar(value="")
+            self._wifi_ssid_pick_listbox = None
 
         self._make_button(
-            list_btn_row,
+            list_outer,
             "Specify SSID not on this list",
             self._go_wifi_manual_ssid,
-        ).pack(side="right", padx=(12, 0), anchor="n")
+        ).pack(fill="x", pady=(10, 0))
 
     def _step_wifi_ssid_manual(self):
         self._add_title("Enter Wi-Fi network name")
@@ -3494,11 +3685,14 @@ class ProvisioningWizard(tk.Tk):
 
         elif step_name == "_step_wifi_ssid_pick":
             lb = getattr(self, "_wifi_ssid_pick_listbox", None)
-            if lb is not None:
+            rows = getattr(self, "_wifi_ssid_pick_rows", None) or []
+            value = ""
+            if lb is not None and rows:
                 sel = lb.curselection()
-                value = lb.get(sel[0]).strip() if sel else ""
-            else:
-                value = ""
+                if sel:
+                    idx = sel[0]
+                    if 0 <= idx < len(rows):
+                        value = (rows[idx].get("ssid") or "").strip()
             hidden = False
             if "\n" in value or "\r" in value:
                 self._show_styled_error_modal("Invalid", "Wi-Fi SSID cannot contain newline characters.")
