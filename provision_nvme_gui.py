@@ -62,8 +62,8 @@ FONT_INPUT = ("DejaVu Sans", 16)
 FONT_WIFI_LIST = ("DejaVu Sans Mono", 13)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
 FONT_WIFI_HIDDEN_CHECK = ("DejaVu Sans", FONT_LABEL[1] * 3 // 2)
-# SSID-pick "hidden network" canvas toggle; inner square edge length (2× former ttk indicator).
-WIFI_HIDDEN_CHECK_INDICATOR_PX = 60
+# SSID-pick "hidden network" canvas toggle; inner square edge length.
+WIFI_HIDDEN_CHECK_INDICATOR_PX = 40
 
 
 def _keyboard_scale(n):
@@ -1424,7 +1424,7 @@ class ProvisioningWizard(tk.Tk):
         """Large canvas checkbox + label; avoids ttk theme ambiguity on checked state."""
         row = tk.Frame(parent, bg=BG)
         inner = WIFI_HIDDEN_CHECK_INDICATOR_PX
-        pad = 10
+        pad = 6
         side = inner + 2 * pad
         canvas = tk.Canvas(
             row,
@@ -1452,12 +1452,13 @@ class ProvisioningWizard(tk.Tk):
             font=FONT_WIFI_HIDDEN_CHECK,
             bg=BG,
             fg=FG,
+            anchor="w",
             justify="left",
-            wraplength=560,
+            wraplength=0,
             cursor="hand2",
         )
         lbl.bind("<Button-1>", toggle)
-        lbl.pack(side="left", fill="x", expand=True, padx=(14, 0), anchor="w")
+        lbl.pack(side="left", fill="x", expand=True, padx=(8, 0), anchor="nw")
         row.pack(fill="x", pady=(16, 16))
 
     def _step_index_for_name(self, step_name):
