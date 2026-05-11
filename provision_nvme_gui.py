@@ -1158,6 +1158,7 @@ class ProvisioningWizard(tk.Tk):
         self.groups = device_groups(self.config)
         self.wifi_ssids = []
         self.wifi_scan_message = ""
+        self._wifi_ssid_scan_cached_country = None
         self._focused_entry = None
         self._keyboard_shift = False
         self._keyboard_rows_frame = None
@@ -1851,19 +1852,26 @@ class ProvisioningWizard(tk.Tk):
         if self.steps[self.step_index].__name__ == "_step_accessory_checks":
             self._render_current_step()
 
-    def _refresh_wifi_scan(self):
+    def _refresh_wifi_scan(self, *, force=False):
+        country = self.answers.get("wifi_country", DEFAULT_WIFI_COUNTRY)
+        if not force and self._wifi_ssid_scan_cached_country == country:
+            return
         dialog, _body = self._show_busy_dialog(
             "Scanning Wi-Fi",
             "Enabling Wi-Fi radio, applying country settings, and scanning for nearby networks.",
         )
         try:
             self.update_idletasks()
-            country = self.answers.get("wifi_country", DEFAULT_WIFI_COUNTRY)
             self.wifi_ssids, self.wifi_scan_message = scan_wifi_ssids(country)
         finally:
             dialog.grab_release()
             dialog.destroy()
             self.update_idletasks()
+        self._wifi_ssid_scan_cached_country = country
+
+    def _rescan_wifi_ssids(self):
+        self._refresh_wifi_scan(force=True)
+        self._render_current_step()
 
     def _normalize_wifi_networks_for_export(self):
         raw = self.answers.get("wifi_networks")
@@ -3011,11 +3019,11 @@ class ProvisioningWizard(tk.Tk):
             "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
             "If your network does not appear after a rescan, use the button on the right."
         )
-        self._refresh_wifi_scan()
+        self._refresh_wifi_scan(force=False)
 
         scan_row = tk.Frame(self.content, bg=BG)
         scan_row.pack(fill="x", pady=(0, 10))
-        self._make_button(scan_row, "Rescan Wi-Fi", self._render_current_step).pack(side="left")
+        self._make_button(scan_row, "Rescan Wi-Fi", self._rescan_wifi_ssids).pack(side="left")
         if self.wifi_scan_message:
             tk.Label(
                 scan_row,
