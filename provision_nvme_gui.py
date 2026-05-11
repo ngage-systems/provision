@@ -61,6 +61,7 @@ FONT_REVIEW = ("DejaVu Sans", 12)
 FONT_INPUT = ("DejaVu Sans", 16)
 FONT_WIFI_LIST = ("DejaVu Sans Mono", 13)
 FONT_BTN = ("DejaVu Sans", 14, "bold")
+FONT_WIFI_HIDDEN_CHECK = ("DejaVu Sans", FONT_LABEL[1] * 3)
 
 
 def _keyboard_scale(n):
@@ -3261,7 +3262,7 @@ class ProvisioningWizard(tk.Tk):
             self._ssid_list_var, listbox = self._add_listbox(
                 display_lines,
                 "",
-                max_visible_rows=10,
+                max_visible_rows=8,
                 parent=list_outer,
                 list_frame_pack={"fill": "both", "expand": True},
                 clamp_height_to_entries=False,
@@ -3303,15 +3304,15 @@ class ProvisioningWizard(tk.Tk):
         hid_pick_row.pack(fill="x", pady=(10, 0))
         tk.Checkbutton(
             hid_pick_row,
-            text="Hidden network (SSID not broadcast)",
+            text="This is a hidden network (SSID not broadcast)",
             variable=self._wifi_pick_hidden_var,
             bg=BG,
             fg=FG,
             selectcolor=ENTRY_BG,
             activebackground=BG,
             activeforeground=FG,
-            font=FONT_LABEL,
-        ).pack(anchor="w")
+            font=FONT_WIFI_HIDDEN_CHECK,
+        ).pack(anchor="w", pady=(16, 16))
 
         self._make_button(
             list_outer,
@@ -3328,7 +3329,7 @@ class ProvisioningWizard(tk.Tk):
         hid_row.pack(fill="x", pady=(8, 0))
         tk.Checkbutton(
             hid_row,
-            text="Hidden network (SSID not broadcast)",
+            text="This is a hidden network (SSID not broadcast)",
             variable=self._wifi_hidden_var,
             bg=BG,
             fg=FG,
