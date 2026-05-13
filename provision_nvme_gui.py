@@ -2311,10 +2311,12 @@ class ProvisioningWizard(tk.Tk):
 
         provision_wrapper = Path("/usr/local/sbin/hb-provision-nvme")
         no_self_update = os.environ.get("HB_PROVISION_NO_SELF_UPDATE", "0").strip() == "1"
-        # hb-provision-nvme does not forward flags; invoke provision_nvme.sh directly when
-        # --no-self-update must reach the backend (sudo env_reset drops HB_PROVISION_*).
-        if provision_wrapper.is_file() and not no_self_update:
+        # Sudoers grants NOPASSWD only for hb-provision-nvme — never use "sudo bash …/provision_nvme.sh"
+        # here or sudo waits for a password with no TTY (hang). Pass extra flags via the wrapper ("$@").
+        if provision_wrapper.is_file():
             backend_args = ["sudo", "-n", str(provision_wrapper)]
+            if no_self_update:
+                backend_args.append("--no-self-update")
         else:
             backend_args = ["sudo", "bash", str(backend), "--answers", str(self.output_path)]
             if no_self_update:

@@ -923,7 +923,7 @@ write_fallback_config() {
   install -d -m 0755 "${root_mnt}/usr/local/sbin"
   cat > "${root_mnt}${provision_wrapper}" <<'EOF'
 #!/usr/bin/env bash
-exec /bin/bash /home/provision/provision/provision_nvme.sh --answers /tmp/hb_provision_answers.json
+exec /bin/bash /home/provision/provision/provision_nvme.sh --answers /tmp/hb_provision_answers.json "$@"
 EOF
   chown root:root "${root_mnt}${provision_wrapper}"
   chmod 0755 "${root_mnt}${provision_wrapper}"
