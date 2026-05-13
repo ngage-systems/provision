@@ -6,9 +6,10 @@ This replaces the old interactive shell questions with a touch-friendly flow.
 It collects answers, validates Wi-Fi when requested, writes JSON output, and
 launches provision_nvme.sh after the user confirms the destructive erase step.
 
-Disable automatic git fetch/merge to refresh this repo before the wizard runs with
-``--no-self-update`` or environment ``HB_PROVISION_NO_SELF_UPDATE=1`` (same as
-provision_nvme.sh).
+Disable automatic git fetch/merge before the wizard runs with ``--no-self-update``
+or ``HB_PROVISION_NO_SELF_UPDATE=1``. The same setting is passed to
+``provision_nvme.sh`` as ``--no-self-update`` when the GUI launches the backend
+(so ``sudo`` does not strip it).
 
 Set ``HB_DEBUG_MODAL_EVENTS=1`` for short ``[pv]`` traces (modal focus/grab, pointer
 hits on Wi‑Fi/install Yes/No, ``next``, choices). Includes ``focusin dialog`` and
@@ -2309,10 +2310,15 @@ class ProvisioningWizard(tk.Tk):
             return False
 
         provision_wrapper = Path("/usr/local/sbin/hb-provision-nvme")
-        if provision_wrapper.is_file():
+        no_self_update = os.environ.get("HB_PROVISION_NO_SELF_UPDATE", "0").strip() == "1"
+        # hb-provision-nvme does not forward flags; invoke provision_nvme.sh directly when
+        # --no-self-update must reach the backend (sudo env_reset drops HB_PROVISION_*).
+        if provision_wrapper.is_file() and not no_self_update:
             backend_args = ["sudo", "-n", str(provision_wrapper)]
         else:
             backend_args = ["sudo", "bash", str(backend), "--answers", str(self.output_path)]
+            if no_self_update:
+                backend_args.append("--no-self-update")
 
         dialog, status_label, log_text, close_button = self._show_provision_log_window()
         output_queue = queue.Queue()
@@ -4134,7 +4140,7 @@ def parse_args():
     parser.add_argument(
         "--no-self-update",
         action="store_true",
-        help="Do not git fetch/merge to update this repo before running (also HB_PROVISION_NO_SELF_UPDATE=1).",
+        help="Do not git fetch/merge for this repo or provision_nvme.sh (also HB_PROVISION_NO_SELF_UPDATE=1).",
     )
     return parser.parse_args()
 
