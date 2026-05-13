@@ -13,6 +13,7 @@ set -euo pipefail
 # - Configure headless settings: SSH, user, hostname, Wi-Fi, timezone, locale
 # - Configure display mode/rotation and monitor geometry
 # - Install dserv stack + ESS repo in NVMe rootfs
+# - Copy /etc/dserv/trial_ingest_secret from the fallback host rootfs when present (written by provision_emmc_for_nvme_fallback.sh)
 # - Enable services, kiosk settings, and seatd (with stim2 startup delay)
 # - Save full log to /var/log/provision/provision_nvme_YYYYMMDD_HHMMSS.log on NVMe rootfs
 # - Optional persistent swap file on host rootfs (eMMC when / is eMMC): HB_EMMC_SWAP_MB (default 2048; 0=off)
@@ -33,6 +34,9 @@ HB_PROVISION_COMPLETE_MARKER="Provisioning complete. Waiting for GUI reboot requ
 # Persistent swap on host rootfs (eMMC when booting from eMMC). Adds /etc/fstab entry. HB_EMMC_SWAP_MB=0 disables.
 HB_EMMC_SWAP_MB="${HB_EMMC_SWAP_MB:-2048}"
 HB_EMMC_SWAP_PATH="${HB_EMMC_SWAP_PATH:-/var/swap/hb_provision.swap}"
+
+# Same path on fallback rootfs (after boot) and on NVMe target after provisioning.
+HB_TRIAL_INGEST_SECRET="/etc/dserv/trial_ingest_secret"
 
 ANSWER_DEFAULTS_GROUP=""
 ANSWER_DEFAULTS_DEVICE_TYPE=""
@@ -2475,6 +2479,33 @@ install_dserv_stack_root() {
   configure_dserv_local_tcl_root "$root_mnt"
 }
 
+sync_trial_ingest_secret_to_nvme_root() {
+  local root_mnt="$1"
+  local host_file="$HB_TRIAL_INGEST_SECRET"
+  local dest="${root_mnt}${HB_TRIAL_INGEST_SECRET}"
+
+  if [[ ! -f "$host_file" ]]; then
+    log "WARNING: Host trial ingest secret not found at ${host_file}; skipping copy to NVMe rootfs."
+    return 0
+  fi
+
+  local line tmp
+  line="$(head -n1 "$host_file" | tr -d '\r')"
+  if [[ -z "$line" ]]; then
+    log "WARNING: Host trial ingest secret at ${host_file} is empty; skipping copy to NVMe rootfs."
+    return 0
+  fi
+
+  tmp="$(mktemp -p /tmp hb_trial_secret.XXXXXX)"
+  chmod 0600 "$tmp" || true
+  printf '%s\n' "$line" > "$tmp"
+
+  install -d -m 0755 -o root -g root "${root_mnt}/etc/dserv"
+  install -m 0600 -o root -g root "$tmp" "$dest"
+  rm -f "$tmp"
+  log "Installed trial ingest secret from host into NVMe rootfs."
+}
+
 install_ess_repo_root() {
   local root_mnt="$1"
   local username="$2"
@@ -2676,6 +2707,7 @@ main() {
 
   configure_nvme_packages_and_services "$HB_ROOT_MNT" "$locale"
   install_dserv_stack_root "$HB_ROOT_MNT"
+  sync_trial_ingest_secret_to_nvme_root "$HB_ROOT_MNT"
   install_ess_repo_root "$HB_ROOT_MNT" "$username"
   write_monitor_tcl_root "$HB_ROOT_MNT"
 

@@ -14,6 +14,9 @@ DEFAULTS_FILE=""
 HB_BOOT_MNT=""
 HB_ROOT_MNT=""
 
+# Same path on fallback rootfs (after boot) and on NVMe after provision_nvme.sh runs.
+HB_TRIAL_INGEST_SECRET="/etc/dserv/trial_ingest_secret"
+
 die() {
   if [[ -n "$LOG_PREFIX" ]]; then
     echo "$LOG_PREFIX ERROR: $*" >&2
@@ -829,12 +832,26 @@ EOF
   fi
 }
 
+print_trial_ingest_secret_banner() {
+  local secret="$1"
+  {
+    echo ""
+    echo "================================================================"
+    echo "Trial ingest secret (copy this value for your records):"
+    echo "$secret"
+    echo "Stored on fallback OS at: ${HB_TRIAL_INGEST_SECRET}"
+    echo "================================================================"
+    echo ""
+  } >&2
+}
+
 write_fallback_config() {
   local boot_mnt="$1"
   local root_mnt="$2"
   local hostname="$3"
   local defaults_group="$4"
   local rotate_choice="$5"
+  local trial_ingest_secret="$6"
 
   log "Configuring fallback OS (user/autostart/sudo)..."
 
@@ -974,6 +991,11 @@ EOF
       log "WARNING: ${root_mnt}/etc/hosts not found; hostname may not fully apply."
     fi
   fi
+
+  install -d -m 0755 -o root -g root "${root_mnt}/etc/dserv"
+  printf '%s\n' "$trial_ingest_secret" > "${root_mnt}${HB_TRIAL_INGEST_SECRET}"
+  chown root:root "${root_mnt}${HB_TRIAL_INGEST_SECRET}"
+  chmod 0600 "${root_mnt}${HB_TRIAL_INGEST_SECRET}"
 }
 
 main() {
@@ -1049,7 +1071,11 @@ main() {
   trap 'cleanup_mounts "${HB_BOOT_MNT:-}" "${HB_ROOT_MNT:-}"' EXIT
   mount_fallback_partitions_for_config "$boot_part" "$root_part" "$HB_BOOT_MNT" "$HB_ROOT_MNT"
 
-  write_fallback_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$hostname" "$defaults_group" "$rotate_choice"
+  need_cmd openssl
+  local trial_ingest_secret
+  trial_ingest_secret="$(openssl rand -hex 8)"
+
+  write_fallback_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$hostname" "$defaults_group" "$rotate_choice" "$trial_ingest_secret"
 
   cleanup_mounts "$HB_BOOT_MNT" "$HB_ROOT_MNT"
   trap - EXIT
@@ -1057,6 +1083,7 @@ main() {
   set_eeprom_boot_to_fallback
 
   log "Fallback provisioning complete."
+  print_trial_ingest_secret_banner "$trial_ingest_secret"
 }
 
 main
