@@ -494,6 +494,7 @@ keys = {
     "ANSWER_NVME_DEVICE": "nvme_device",
     "ANSWER_ALLOW_POSSIBLE_SD": "allow_possible_sd",
     "ANSWER_CONNECTIVITY_CONTINUE_ANYWAY": "connectivity_continue_anyway",
+    "ANSWER_CLOUD_TRIAL_INGEST": "cloud_trial_ingest",
 }
 
 for shell_name, json_name in keys.items():
@@ -2506,6 +2507,44 @@ sync_trial_ingest_secret_to_nvme_root() {
   log "Installed trial ingest secret from host into NVMe rootfs."
 }
 
+configure_trial_ingest_pre_remoteservers_root() {
+  local root_mnt="$1"
+  local dir="${root_mnt}/usr/local/dserv/local"
+  local target="${dir}/pre-remoteservers.tcl"
+  local example="${dir}/pre-remoteservers.tcl.EXAMPLE"
+
+  if [[ "${ANSWER_CLOUD_TRIAL_INGEST:-false}" != "true" ]]; then
+    return 0
+  fi
+
+  install -d -m 0755 -o root -g root "$dir" || true
+
+  if [[ ! -f "$target" ]]; then
+    if [[ -f "$example" ]]; then
+      if ! cp "$example" "$target"; then
+        log "WARNING: Could not copy ${example} to ${target}; skipping trial ingest URL config."
+        return 0
+      fi
+    else
+      log "WARNING: ${example} not found; creating empty ${target} for trial ingest lines."
+      : >"$target" || true
+    fi
+  fi
+
+  if grep -qE '^[[:space:]]*set[[:space:]]+env\(ESS_TRIAL_INGEST_BASE_URL\)' "$target" 2>/dev/null; then
+    return 0
+  fi
+
+  if [[ -s "$target" ]] && [[ "$(tail -c1 "$target" 2>/dev/null)" != $'\n' ]]; then
+    printf '\n' >>"$target" || true
+  fi
+  cat >>"$target" <<'EOF'
+set env(ESS_TRIAL_INGEST_BASE_URL) {https://ngage.systems/ingest.php}
+dservSet configs/trial_ingest_base_url $env(ESS_TRIAL_INGEST_BASE_URL)
+EOF
+  log "Appended trial ingest base URL to pre-remoteservers.tcl"
+}
+
 install_ess_repo_root() {
   local root_mnt="$1"
   local username="$2"
@@ -2708,6 +2747,7 @@ main() {
   configure_nvme_packages_and_services "$HB_ROOT_MNT" "$locale"
   install_dserv_stack_root "$HB_ROOT_MNT"
   sync_trial_ingest_secret_to_nvme_root "$HB_ROOT_MNT"
+  configure_trial_ingest_pre_remoteservers_root "$HB_ROOT_MNT"
   install_ess_repo_root "$HB_ROOT_MNT" "$username"
   write_monitor_tcl_root "$HB_ROOT_MNT"
 

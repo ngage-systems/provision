@@ -1346,9 +1346,11 @@ class ProvisioningWizard(tk.Tk):
             self._step_username,
             self._step_password,
             self._step_login_credentials_reminder,
+            self._step_cloud_trial_ingest,
             self._step_review,
         ]
         self.step_index = 0
+        self._cloud_nav_frame = None
         self._restore_resume_state()
         self._maybe_self_update("startup")
 
@@ -2039,12 +2041,29 @@ class ProvisioningWizard(tk.Tk):
         self.btn_next.config(
             text="Finish" if self.step_index == len(self.steps) - 1 else "Next >"
         )
-        if step_name == "_step_accessory_checks":
-            self.btn_recheck_accessories.pack(
-                side="left", padx=(0, 15), before=self.btn_next
-            )
+        self.btn_next.pack_forget()
+        self.btn_recheck_accessories.pack_forget()
+        if getattr(self, "_cloud_nav_frame", None) is not None:
+            self._cloud_nav_frame.destroy()
+            self._cloud_nav_frame = None
+        if step_name == "_step_cloud_trial_ingest":
+            self._cloud_nav_frame = tk.Frame(self.nav_right, bg=BG)
+            self._cloud_nav_frame.pack(side="left")
+            self._make_button(
+                self._cloud_nav_frame,
+                "No",
+                lambda: self._cloud_trial_ingest_chosen(False),
+            ).pack(side="left", padx=(0, 12))
+            self._make_button(
+                self._cloud_nav_frame,
+                "Yes",
+                lambda: self._cloud_trial_ingest_chosen(True),
+                primary=True,
+            ).pack(side="left")
         else:
-            self.btn_recheck_accessories.pack_forget()
+            if step_name == "_step_accessory_checks":
+                self.btn_recheck_accessories.pack(side="left", padx=(0, 15))
+            self.btn_next.pack(side="left")
         self.steps[self.step_index]()
 
     def _next_index(self, index):
@@ -2055,6 +2074,9 @@ class ProvisioningWizard(tk.Tk):
                 next_index += 1
                 continue
             if name == "_step_wifi_password" and not self.answers.get("wifi_ssid"):
+                next_index += 1
+                continue
+            if name == "_step_cloud_trial_ingest" and not self._defaults_group_cloud_data_store_enabled():
                 next_index += 1
                 continue
             break
@@ -2070,6 +2092,9 @@ class ProvisioningWizard(tk.Tk):
             if name == "_step_wifi_password" and not self.answers.get("wifi_ssid"):
                 previous_index -= 1
                 continue
+            if name == "_step_cloud_trial_ingest" and not self._defaults_group_cloud_data_store_enabled():
+                previous_index -= 1
+                continue
             break
         return previous_index
 
@@ -2080,8 +2105,12 @@ class ProvisioningWizard(tk.Tk):
         if self._maybe_branch_wifi_network_collection_after_password():
             return
         if self.step_index < len(self.steps) - 1:
-            self.step_index = self._next_index(self.step_index)
-            self._render_current_step()
+            next_idx = self._next_index(self.step_index)
+            if next_idx >= len(self.steps):
+                self._on_finish()
+            else:
+                self.step_index = next_idx
+                self._render_current_step()
         else:
             self._on_finish()
 
@@ -2456,6 +2485,20 @@ class ProvisioningWizard(tk.Tk):
                 return mesh_workgroup.replace(".", "-")
 
         return group.replace(".", "-") if group else ""
+
+    def _defaults_group_cloud_data_store_enabled(self):
+        group = self.answers.get("defaults_group", "").strip()
+        if not group or not self.config.has_section(group):
+            return False
+        raw = self.config.get(group, "cloud_data_store", fallback="").strip().lower()
+        return raw in ("yes", "1", "true", "on")
+
+    def _cloud_trial_workgroup_display_name(self):
+        mesh = self._selected_mesh_workgroup()
+        if mesh:
+            return mesh
+        group = self.answers.get("defaults_group", "").strip()
+        return group or "This workgroup"
 
     def _provision_running_message(self):
         message = (
@@ -3621,6 +3664,24 @@ class ProvisioningWizard(tk.Tk):
                 justify="left",
             ).pack(side="left", fill="x", expand=True)
 
+    def _cloud_trial_ingest_chosen(self, enabled):
+        self.answers["cloud_trial_ingest"] = bool(enabled)
+        self.step_index = self.steps.index(self._step_review)
+        self._render_current_step()
+
+    def _step_cloud_trial_ingest(self):
+        wg = self._cloud_trial_workgroup_display_name()
+        self._add_title("Would you like to store data from this machine in the cloud?")
+        self._add_label(
+            f'{wg} has a secure cloud database available to store data. If you choose "Yes" below, '
+            "it will automatically upload each trial to that cloud database as trials are completed. "
+            "It is not a publicly accessible database, but can be useful for things like real-time "
+            "monitoring of performance and more convenient data analysis. It will only store trial "
+            "parameters and the outcome of those trials (e.g., correct or incorrect, reaction time, etc); "
+            "it does not store photos nor does it store data-intensive fields like eye tracking data. "
+            "If you choose yes, contact ngage-systems for information on how to access these data.",
+        )
+
     def _step_review(self):
         self._add_title("Review setup")
         self._add_label("Check these settings before starting provisioning.")
@@ -3678,6 +3739,13 @@ class ProvisioningWizard(tk.Tk):
             ("Username", self.answers.get("username", "")),
             ("Password", self.answers.get("password", "")),
         ]
+        if self._defaults_group_cloud_data_store_enabled() and "cloud_trial_ingest" in self.answers:
+            rows.append(
+                (
+                    "Cloud trial data",
+                    "Yes" if self.answers.get("cloud_trial_ingest") else "No",
+                )
+            )
         for label, value in rows:
             row = tk.Frame(review_frame, bg=ENTRY_BG)
             row.pack(fill="x", pady=2)
@@ -3772,6 +3840,7 @@ class ProvisioningWizard(tk.Tk):
             self.answers["defaults_group"] = value
             self.answers.pop("defaults_device_type", None)
             self.answers.pop("defaults_section", None)
+            self.answers.pop("cloud_trial_ingest", None)
 
         elif step_name == "_step_defaults_device_type":
             group = self.answers.get("defaults_group", "")
@@ -3788,6 +3857,7 @@ class ProvisioningWizard(tk.Tk):
             self.answers["defaults_device_type"] = device_type
             self.answers["defaults_section"] = section
             self._apply_defaults_section(section)
+            self.answers.pop("cloud_trial_ingest", None)
 
         elif step_name == "_step_wifi_country":
             value = self._wifi_country_var.get().strip().upper() or DEFAULT_WIFI_COUNTRY
@@ -4098,6 +4168,9 @@ class ProvisioningWizard(tk.Tk):
             self.answers["password"] = value
 
         elif step_name == "_step_login_credentials_reminder":
+            return True
+
+        elif step_name == "_step_cloud_trial_ingest":
             return True
 
         elif step_name == "_step_monitor_width":
