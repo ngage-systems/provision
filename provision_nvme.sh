@@ -260,6 +260,12 @@ ini_get() {
   ' "$file"
 }
 
+cloud_ingest_url_for_defaults_group() {
+  local group="$1"
+  local file="$2"
+  ini_get "$file" "$group" "cloud_ingest"
+}
+
 select_defaults_section() {
   local file="$1"
   local section="${DEVICE_DEFAULTS_SECTION:-}"
@@ -2531,6 +2537,30 @@ configure_trial_ingest_pre_remoteservers_root() {
     fi
   fi
 
+  local defaults_file="${DEFAULTS_FILE:-}"
+  if [[ -z "$defaults_file" || ! -r "$defaults_file" ]]; then
+    local script_path script_dir
+    script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+    script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
+    defaults_file="${script_dir}/device_defaults.ini"
+  fi
+
+  local group="${ANSWER_DEFAULTS_GROUP:-}"
+  if [[ -z "$group" && -n "${DEFAULTS_SECTION:-}" ]]; then
+    group="${DEFAULTS_SECTION%.*}"
+  fi
+  if [[ -z "$group" ]]; then
+    log "WARNING: No defaults group available; skipping trial ingest URL in pre-remoteservers.tcl."
+    return 0
+  fi
+
+  local cloud_ingest_url
+  cloud_ingest_url="$(cloud_ingest_url_for_defaults_group "$group" "$defaults_file")"
+  if [[ -z "$cloud_ingest_url" ]]; then
+    log "WARNING: cloud_ingest not set for section ${group} in ${defaults_file}; skipping trial ingest URL in pre-remoteservers.tcl."
+    return 0
+  fi
+
   if grep -qE '^[[:space:]]*set[[:space:]]+env\(ESS_TRIAL_INGEST_BASE_URL\)' "$target" 2>/dev/null; then
     return 0
   fi
@@ -2538,11 +2568,11 @@ configure_trial_ingest_pre_remoteservers_root() {
   if [[ -s "$target" ]] && [[ "$(tail -c1 "$target" 2>/dev/null)" != $'\n' ]]; then
     printf '\n' >>"$target" || true
   fi
-  cat >>"$target" <<'EOF'
-set env(ESS_TRIAL_INGEST_BASE_URL) {https://ngage.systems/ingest.php}
-dservSet configs/trial_ingest_base_url $env(ESS_TRIAL_INGEST_BASE_URL)
+  cat >>"$target" <<EOF
+set env(ESS_TRIAL_INGEST_BASE_URL) {${cloud_ingest_url}}
+dservSet configs/trial_ingest_base_url \$env(ESS_TRIAL_INGEST_BASE_URL)
 EOF
-  log "Appended trial ingest base URL to pre-remoteservers.tcl"
+  log "Appended trial ingest base URL (${cloud_ingest_url}) to pre-remoteservers.tcl"
 }
 
 install_ess_repo_root() {
