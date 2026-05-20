@@ -135,6 +135,51 @@ ini_list_groups_for_org() {
   ini_list_sections "$file" | awk -F. -v o="$org" 'NF>=2 && $1==o {print $2}' | sort -u
 }
 
+ini_get() {
+  local file="$1"
+  local section="$2"
+  local key="$3"
+  awk -v section="$section" -v key="$key" '
+    /^[[:space:]]*[#;]/ {next}
+    /^[[:space:]]*\[/ {
+      line=$0
+      sub(/^[[:space:]]*\[/, "", line)
+      sub(/\][[:space:]]*$/, "", line)
+      in_section=(line==section)
+      next
+    }
+    in_section {
+      split($0, a, "=")
+      k=a[1]
+      sub(/^[[:space:]]+/, "", k); sub(/[[:space:]]+$/, "", k)
+      if (k==key) {
+        v=substr($0, index($0, "=")+1)
+        sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+        print v
+        exit
+      }
+    }
+  ' "$file"
+}
+
+mesh_workgroup_for_defaults_group() {
+  local group="$1"
+  local file="$2"
+  local wg
+  wg="$(ini_get "$file" "$group" "mesh_workgroup")"
+  if [[ -n "$wg" ]]; then
+    echo "$wg"
+    return 0
+  fi
+  echo "${group//./-}"
+}
+
+cloud_registry_url_for_defaults_group() {
+  local group="$1"
+  local file="$2"
+  ini_get "$file" "$group" "cloud_registry"
+}
+
 prompt_org_group() {
   local script_path script_dir defaults_file
   script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
@@ -201,6 +246,7 @@ prompt_org_group() {
     fi
   done
 
+  DEFAULTS_FILE="$defaults_file"
   echo "${org}.${group}"
 }
 
@@ -598,7 +644,7 @@ install_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends \
-    wget xz-utils openssl ca-certificates \
+    wget curl xz-utils openssl ca-certificates \
     util-linux coreutils gawk grep sed \
     parted \
     dosfstools e2fsprogs \
@@ -837,12 +883,77 @@ print_trial_ingest_secret_banner() {
   {
     echo ""
     echo "================================================================"
-    echo "Trial ingest secret (copy this value for your records):"
+    echo "WARNING: Cloud registry registration failed."
+    echo "Create the writer row manually using this passkey:"
     echo "$secret"
     echo "Stored on fallback OS at: ${HB_TRIAL_INGEST_SECRET}"
     echo "================================================================"
     echo ""
   } >&2
+}
+
+register_trial_ingest_writer() {
+  local registry_url="$1"
+  local mesh_workgroup="$2"
+  local hostname="$3"
+  local passkey="$4"
+
+  need_cmd curl
+  need_cmd python3
+
+  log "Registering trial ingest writer with cloud registry..."
+
+  local json_body
+  json_body="$(python3 -c '
+import json, sys
+print(json.dumps({
+    "workgroup": sys.argv[1],
+    "user": sys.argv[2],
+    "pass": sys.argv[3],
+    "role": "writer",
+}))
+' "$mesh_workgroup" "$hostname" "$passkey")"
+
+  local tmp_response http_code response
+  tmp_response="$(mktemp)"
+  if ! http_code="$(curl -sS -o "$tmp_response" -w '%{http_code}' -X POST "$registry_url" \
+    -H 'Content-Type: application/json' \
+    --data "$json_body")"; then
+    rm -f "$tmp_response"
+    log "WARNING: Cloud registry request failed (network, DNS, or TLS error)."
+    return 1
+  fi
+  response="$(cat "$tmp_response")"
+  rm -f "$tmp_response"
+
+  local parse_result
+  parse_result="$(RESPONSE="$response" HTTP_CODE="$http_code" python3 -c '
+import json, os, sys
+
+raw = os.environ.get("RESPONSE", "")
+code = os.environ.get("HTTP_CODE", "")
+try:
+    body = json.loads(raw) if raw.strip() else {}
+except json.JSONDecodeError:
+    snippet = raw[:200].replace("\n", " ")
+    print(f"ERROR|Cloud registry returned non-JSON (HTTP {code}): {snippet}")
+    sys.exit(0)
+if body.get("ok"):
+    writer_id = body.get("writer_id", "?")
+    workgroup = body.get("workgroup", "?")
+    print(f"OK|writer_id={writer_id} workgroup={workgroup}")
+else:
+    err = body.get("error", "unknown")
+    msg = body.get("message", raw[:200])
+    print(f"ERROR|HTTP {code}: {err}: {msg}")
+')"
+
+  if [[ "${parse_result%%|*}" == "OK" ]]; then
+    log "Trial ingest writer registered (${parse_result#*|}; inactive until activated in MySQL)."
+    return 0
+  fi
+  log "WARNING: ${parse_result#*|}"
+  return 1
 }
 
 write_fallback_config() {
@@ -1077,13 +1188,26 @@ main() {
 
   write_fallback_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$hostname" "$defaults_group" "$rotate_choice" "$trial_ingest_secret"
 
+  local mesh_workgroup cloud_registry_url registered=0
+  mesh_workgroup="$(mesh_workgroup_for_defaults_group "$defaults_group" "$DEFAULTS_FILE")"
+  cloud_registry_url="$(cloud_registry_url_for_defaults_group "$defaults_group" "$DEFAULTS_FILE")"
+  if [[ -z "$cloud_registry_url" ]]; then
+    log "WARNING: cloud_registry not set for section ${defaults_group} in ${DEFAULTS_FILE}"
+  elif register_trial_ingest_writer "$cloud_registry_url" "$mesh_workgroup" "$hostname" "$trial_ingest_secret"; then
+    registered=1
+  fi
+  if [[ "$registered" -eq 1 ]]; then
+    log "Trial ingest secret stored on fallback OS at ${HB_TRIAL_INGEST_SECRET}."
+  else
+    print_trial_ingest_secret_banner "$trial_ingest_secret"
+  fi
+
   cleanup_mounts "$HB_BOOT_MNT" "$HB_ROOT_MNT"
   trap - EXIT
 
   set_eeprom_boot_to_fallback
 
   log "Fallback provisioning complete."
-  print_trial_ingest_secret_banner "$trial_ingest_secret"
 }
 
 main
