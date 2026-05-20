@@ -139,6 +139,8 @@ ini_get() {
   local file="$1"
   local section="$2"
   local key="$3"
+  [[ -n "$file" ]] || die "ini_get: defaults file path is empty"
+  [[ -r "$file" ]] || die "ini_get: cannot read defaults file: $file"
   awk -v section="$section" -v key="$key" '
     /^[[:space:]]*[#;]/ {next}
     /^[[:space:]]*\[/ {
@@ -180,11 +182,16 @@ cloud_registry_url_for_defaults_group() {
   ini_get "$file" "$group" "cloud_registry"
 }
 
-prompt_org_group() {
-  local script_path script_dir defaults_file
+resolve_defaults_file() {
+  local script_path script_dir
   script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
-  defaults_file="${DEVICE_DEFAULTS_FILE:-${script_dir}/device_defaults.ini}"
+  echo "${DEVICE_DEFAULTS_FILE:-${script_dir}/device_defaults.ini}"
+}
+
+prompt_org_group() {
+  local defaults_file="$1"
+  [[ -n "$defaults_file" ]] || defaults_file="$(resolve_defaults_file)"
 
   local org=""
   local group=""
@@ -246,7 +253,6 @@ prompt_org_group() {
     fi
   done
 
-  DEFAULTS_FILE="$defaults_file"
   echo "${org}.${group}"
 }
 
@@ -916,7 +922,7 @@ print(json.dumps({
 
   local tmp_response http_code response
   tmp_response="$(mktemp)"
-  if ! http_code="$(curl -sS -o "$tmp_response" -w '%{http_code}' -X POST "$registry_url" \
+  if ! http_code="$(curl -sS --connect-timeout 10 --max-time 30 -o "$tmp_response" -w '%{http_code}' -X POST "$registry_url" \
     -H 'Content-Type: application/json' \
     --data "$json_body")"; then
     rm -f "$tmp_response"
@@ -1074,7 +1080,7 @@ EOF
   rm -rf "$repo_dir"
   git clone https://github.com/ngage-systems/provision.git "$repo_dir"
 
-  # Ensure script is executable and ownership is correct.
+  log "Setting ownership on fallback home directory..."
   chmod +x "${repo_dir}/provision_emmc_for_nvme_fallback.sh" || true
   chmod +x "${repo_dir}/provision_nvme.sh" || true
   chmod +x "${repo_dir}/provision_nvme_gui.py" || true
@@ -1103,6 +1109,7 @@ EOF
     fi
   fi
 
+  log "Writing trial ingest secret on fallback root..."
   install -d -m 0755 -o root -g root "${root_mnt}/etc/dserv"
   printf '%s\n' "$trial_ingest_secret" > "${root_mnt}${HB_TRIAL_INGEST_SECRET}"
   chown root:root "${root_mnt}${HB_TRIAL_INGEST_SECRET}"
@@ -1149,8 +1156,9 @@ main() {
     die "Refusing to overwrite the current root device ($root_dev). Boot from NVMe or SD and retry."
   fi
 
+  DEFAULTS_FILE="$(resolve_defaults_file)"
   local defaults_group
-  defaults_group="$(prompt_org_group)"
+  defaults_group="$(prompt_org_group "$DEFAULTS_FILE")"
 
   local hostname
   hostname="$(prompt_hostname_fallback)"
