@@ -995,7 +995,23 @@ NM_AGENT_PATH = "/org/freedesktop/NetworkManager/SecretAgent"
 NM_AGENT_MGR_IFACE = "org.freedesktop.NetworkManager.AgentManager"
 NM_AGENT_MGR_PATH = "/org/freedesktop/NetworkManager/AgentManager"
 NM_BUS_NAME = "org.freedesktop.NetworkManager"
-NM_NO_SECRETS_ERROR = "org.freedesktop.NetworkManager.SecretManager.NoSecrets"
+NM_USER_CANCELED_ERROR = "org.freedesktop.NetworkManager.SecretManager.UserCanceled"
+
+
+def wifi_psk_usable_for_password_sync(readback, typed_password):
+    """True when NM readback plausibly differs from the GUI password and is exportable."""
+    if not readback or readback == typed_password:
+        return False
+    if "\n" in readback or "\r" in readback:
+        return False
+    if readback == "--" or readback.lower() in ("<hidden>", "****"):
+        return False
+    if re.fullmatch(r"\*+", readback):
+        return False
+    # 256-bit PMK hex from NM — not the user passphrase we should export.
+    if re.fullmatch(r"[0-9a-fA-F]{64}", readback):
+        return False
+    return 8 <= len(readback) <= 63
 
 
 if _DBUS_AVAILABLE:
@@ -1005,16 +1021,22 @@ if _DBUS_AVAILABLE:
 
         Returns the user-typed PSK on the first GetSecrets call. On any subsequent
         call (or any call carrying the REQUEST_NEW flag, which means NM has
-        already determined the previous secret was wrong) it raises NoSecrets so
-        NetworkManager gives up immediately. This prevents the desktop secret
-        agent (nm-applet et al.) from popping its own dialog and silently
-        substituting a different password than what the user typed in our GUI.
+        already determined the previous secret was wrong) it raises UserCanceled
+        so NetworkManager aborts the secret request instead of asking the next
+        registered agent (desktop nm-applet / Pi network UI), which would let
+        the user substitute a password our wizard never records.
         """
 
         def __init__(self, bus, typed_psk):
             super().__init__(bus, NM_AGENT_PATH)
             self._psk = typed_psk
             self._answered = False
+
+        def _abort_secret_request(self):
+            raise dbus.DBusException(
+                "Secrets request canceled by provisioning agent",
+                name=NM_USER_CANCELED_ERROR,
+            )
 
         @dbus.service.method(
             NM_AGENT_IFACE,
@@ -1024,7 +1046,7 @@ if _DBUS_AVAILABLE:
         def GetSecrets(self, connection, conn_path, setting_name, hints, flags):
             request_new = bool(flags & 0x2)
             if self._answered or request_new:
-                raise dbus.DBusException("No secrets available", name=NM_NO_SECRETS_ERROR)
+                self._abort_secret_request()
             self._answered = True
             if str(setting_name) == "802-11-wireless-security":
                 return {
@@ -1032,7 +1054,7 @@ if _DBUS_AVAILABLE:
                         "psk": dbus.String(self._psk),
                     }
                 }
-            raise dbus.DBusException("No secrets available", name=NM_NO_SECRETS_ERROR)
+            self._abort_secret_request()
 
         @dbus.service.method(NM_AGENT_IFACE, in_signature="os", out_signature="")
         def CancelGetSecrets(self, conn_path, setting_name):
@@ -1075,7 +1097,12 @@ def hb_secret_agent(typed_psk):
         loop = GLib.MainLoop()
         thread = threading.Thread(target=loop.run, daemon=True)
         thread.start()
-    except Exception:
+    except Exception as exc:
+        print(
+            f"WARNING: hb_secret_agent registration failed ({exc}); "
+            "desktop NetworkManager dialog may appear during Wi-Fi test.",
+            file=sys.stderr,
+        )
         if registered and mgr is not None:
             try:
                 mgr.Unregister(dbus_interface=NM_AGENT_MGR_IFACE)
@@ -2175,6 +2202,24 @@ class ProvisioningWizard(tk.Tk):
         self.answers["wifi_ssid"] = (first.get("ssid") or "").strip()
         self.answers["wifi_password"] = first.get("password") or ""
         self.answers["wifi_hidden"] = bool(first.get("hidden"))
+
+    def _apply_wifi_test_password_sync(self, typed_password, actual_password):
+        """If NM stored a different usable passphrase, sync wizard state from readback."""
+        if not wifi_psk_usable_for_password_sync(actual_password, typed_password):
+            return typed_password
+        self.answers["wifi_password"] = actual_password
+        var = getattr(self, "_wifi_password_var", None)
+        if var is not None:
+            try:
+                var.set(actual_password)
+            except tk.TclError:
+                pass
+        print(
+            "[pv] Wi-Fi password synced from NetworkManager readback "
+            "(differs from typed value).",
+            file=sys.stderr,
+        )
+        return actual_password
 
     def _restore_wifi_test_state_from_saved_network(self, net):
         """Rebuild flat wifi_test_* answers from a saved wifi_networks row (for UI/review)."""
@@ -4062,9 +4107,10 @@ class ProvisioningWizard(tk.Tk):
                 self.answers["wifi_test_message"] = result["message"]
 
                 if result["ok"]:
-                    # Do not gate on NM secret readback. Association already used the passphrase from
-                    # hb_secret_agent; nmcli may expose WPA2 PMK hex, WPA3 blobs, masking, etc., so a
-                    # string compare falsely fails and wedges this step despite a successful connect.
+                    value = self._apply_wifi_test_password_sync(
+                        value, result.get("actual_password") or ""
+                    )
+                    test_signature = (ssid, value, hidden_now)
 
                     redo_full_wifi = False
                     while True:
