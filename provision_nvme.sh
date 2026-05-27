@@ -2532,7 +2532,7 @@ configure_trial_ingest_pre_remoteservers_root() {
         return 0
       fi
     else
-      log "WARNING: ${example} not found; creating empty ${target} for trial ingest lines."
+      log "WARNING: ${example} not found; creating empty ${target} for trial ingest line."
       : >"$target" || true
     fi
   fi
@@ -2561,7 +2561,7 @@ configure_trial_ingest_pre_remoteservers_root() {
     return 0
   fi
 
-  if grep -qE '^[[:space:]]*set[[:space:]]+env\(ESS_TRIAL_INGEST_BASE_URL\)' "$target" 2>/dev/null; then
+  if grep -qE '^[[:space:]]*dservSet[[:space:]]+configs/trial_ingest_base_url' "$target" 2>/dev/null; then
     return 0
   fi
 
@@ -2569,8 +2569,7 @@ configure_trial_ingest_pre_remoteservers_root() {
     printf '\n' >>"$target" || true
   fi
   cat >>"$target" <<EOF
-set env(ESS_TRIAL_INGEST_BASE_URL) {${cloud_ingest_url}}
-dservSet configs/trial_ingest_base_url \$env(ESS_TRIAL_INGEST_BASE_URL)
+dservSet configs/trial_ingest_base_url {${cloud_ingest_url}}
 EOF
   log "Appended trial ingest base URL (${cloud_ingest_url}) to pre-remoteservers.tcl"
 }
