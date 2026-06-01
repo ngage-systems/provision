@@ -842,18 +842,78 @@ cleanup_mounts() {
   fi
 }
 
-set_eeprom_boot_to_fallback() {
-  # Best-effort non-interactive edit using EDITOR trick; falls back with instructions if it fails.
+# Boot-order helpers — keep in sync with provision_nvme.sh
+device_boot_nibble() {
+  local dev="$1"
+  case "$dev" in
+    /dev/nvme*)
+      echo 6
+      return 0
+      ;;
+    /dev/mmcblk*)
+      echo 1
+      return 0
+      ;;
+    /dev/sd*)
+      local tran rm
+      tran="$(lsblk -dn -o TRAN "$dev" 2>/dev/null | head -n1 || true)"
+      rm="$(lsblk -dn -o RM "$dev" 2>/dev/null | head -n1 || true)"
+      if [[ "$tran" == "usb" || "$rm" == "1" ]]; then
+        echo 4
+        return 0
+      fi
+      die "Unknown boot mode for block device: $dev"
+      ;;
+    *)
+      die "Unsupported block device for boot order: $dev"
+      ;;
+  esac
+}
+
+boot_order_label() {
+  case "$1" in
+    1) echo "microSD/eMMC" ;;
+    4) echo "USB" ;;
+    6) echo "NVMe" ;;
+    *) echo "unknown($1)" ;;
+  esac
+}
+
+boot_order_for_devices() {
+  local primary_dev="$1"
+  local fallback_dev="$2"
+  local primary_nibble fallback_nibble
+
+  [[ "$primary_dev" != "$fallback_dev" ]] || die "Primary and fallback devices must differ: $primary_dev"
+  primary_nibble="$(device_boot_nibble "$primary_dev")"
+  fallback_nibble="$(device_boot_nibble "$fallback_dev")"
+  printf '0x%x' $((0xf00 | (fallback_nibble << 4) | primary_nibble))
+}
+
+set_eeprom_boot_order() {
+  local primary_dev="$1"
+  local fallback_dev="$2"
+  local boot_order primary_nibble fallback_nibble need_pcie=0
+  local primary_label fallback_label editor
+
+  boot_order="$(boot_order_for_devices "$primary_dev" "$fallback_dev")"
+  primary_nibble="$(device_boot_nibble "$primary_dev")"
+  fallback_nibble="$(device_boot_nibble "$fallback_dev")"
+  primary_label="$(boot_order_label "$primary_nibble")"
+  fallback_label="$(boot_order_label "$fallback_nibble")"
+  [[ "$primary_nibble" == "6" || "$fallback_nibble" == "6" ]] && need_pcie=1
+
   need_cmd rpi-eeprom-update
   need_cmd rpi-eeprom-config
 
   log "Updating EEPROM package + applying latest EEPROM update (if available)..."
   rpi-eeprom-update -a || true
 
-  log "Setting EEPROM BOOT_ORDER to prefer fallback media first (SD/eMMC then USB; BOOT_ORDER=0xf41) ..."
+  log "Setting EEPROM BOOT_ORDER to ${boot_order} (${primary_label} first, ${fallback_label} fallback)..."
 
-  local editor="/tmp/hb_rpi_eeprom_editor_emmc.sh"
-  cat > "$editor" <<'EOF'
+  editor="/tmp/hb_rpi_eeprom_editor.sh"
+  {
+    cat <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 f="$1"
@@ -866,9 +926,12 @@ ensure_kv() {
     printf '%s=%s\n' "$key" "$val" >> "$f"
   fi
 }
-
-ensure_kv "BOOT_ORDER" "0xf41"
 EOF
+    printf 'ensure_kv "BOOT_ORDER" "%s"\n' "$boot_order"
+    if [[ "$need_pcie" == "1" ]]; then
+      echo 'ensure_kv "PCIE_PROBE" "1"'
+    fi
+  } > "$editor"
   chmod +x "$editor"
 
   if EDITOR="$editor" rpi-eeprom-config --edit >/dev/null 2>&1; then
@@ -880,7 +943,10 @@ EOF
     log "You can run manually:"
     log "  sudo rpi-eeprom-config -e"
     log "and set:"
-    log "  BOOT_ORDER=0xf41"
+    log "  BOOT_ORDER=${boot_order}"
+    if [[ "$need_pcie" == "1" ]]; then
+      log "  PCIE_PROBE=1"
+    fi
   fi
 }
 
@@ -1213,7 +1279,7 @@ main() {
   cleanup_mounts "$HB_BOOT_MNT" "$HB_ROOT_MNT"
   trap - EXIT
 
-  set_eeprom_boot_to_fallback
+  set_eeprom_boot_order "$fallback_dev" "$root_dev"
 
   log "Fallback provisioning complete."
 }

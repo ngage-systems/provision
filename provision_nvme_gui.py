@@ -607,6 +607,96 @@ def detect_camera():
     return accessory_result(False, detail)
 
 
+def strip_partition_suffix(src):
+    src = (src or "").strip()
+    if re.fullmatch(r"/dev/mmcblk\d+p\d+", src):
+        return re.sub(r"p\d+$", "", src)
+    if re.fullmatch(r"/dev/nvme\d+n\d+p\d+", src):
+        return re.sub(r"p\d+$", "", src)
+    return re.sub(r"\d+$", "", src)
+
+
+def root_block_device():
+    result = run_command(["findmnt", "-n", "-o", "SOURCE", "/"], timeout=5)
+    if result.returncode != 0:
+        return ""
+    src = (result.stdout or "").strip()
+    if src.startswith("/dev/"):
+        return strip_partition_suffix(src)
+    return ""
+
+
+def classify_boot_target_device(dev, tran="", rm=""):
+    name = Path(dev).name
+    if name.startswith("nvme"):
+        return "NVMe"
+    boot0 = Path(f"{dev}boot0")
+    if boot0.exists():
+        return "eMMC"
+    if re.fullmatch(r"mmcblk\d+", name):
+        return "microSD/MMC"
+    if tran == "usb" or rm == "1":
+        return "USB"
+    return "block"
+
+
+def list_boot_target_candidates():
+    root_dev = root_block_device()
+    result = run_command(
+        ["lsblk", "-dn", "-P", "-o", "NAME,TYPE,SIZE,MODEL,TRAN,RM"],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return [], root_dev
+
+    candidates = []
+    for line in (result.stdout or "").splitlines():
+        fields = {}
+        for match in re.finditer(r'(\w+)="([^"]*)"', line):
+            fields[match.group(1)] = match.group(2)
+        name = fields.get("NAME", "")
+        dev_type = fields.get("TYPE", "")
+        if dev_type != "disk" or not name:
+            continue
+        if re.match(r"^(loop|zram|ram|sr)", name):
+            continue
+        if not (
+            re.fullmatch(r"mmcblk\d+", name)
+            or re.fullmatch(r"sd[a-z]+", name)
+            or name.startswith("nvme")
+        ):
+            continue
+        dev = f"/dev/{name}"
+        if root_dev and dev == root_dev:
+            continue
+        device_class = classify_boot_target_device(
+            dev,
+            tran=fields.get("TRAN", ""),
+            rm=fields.get("RM", ""),
+        )
+        candidates.append(
+            {
+                "dev": dev,
+                "size": fields.get("SIZE", ""),
+                "model": fields.get("MODEL", ""),
+                "class": device_class,
+                "tran": fields.get("TRAN", ""),
+                "rm": fields.get("RM", ""),
+            }
+        )
+    return candidates, root_dev
+
+
+def format_boot_target_line(row):
+    parts = [row["dev"], f"({row['class']}"]
+    if row.get("size"):
+        parts.append(f", {row['size']}")
+    if row.get("model"):
+        parts.append(f", {row['model']}")
+    parts.append(")")
+    return " ".join(parts)
+
+
 def check_accessories():
     lsusb_result = run_command(["lsusb"], timeout=5)
     lsusb_output = lsusb_result.stdout if lsusb_result.returncode == 0 else ""
@@ -1360,6 +1450,7 @@ class ProvisioningWizard(tk.Tk):
             self._step_wifi_ssid_manual,
             self._step_wifi_password,
             self._step_accessory_checks,
+            self._step_boot_target_device,
             self._step_timezone,
             self._step_locale,
             self._step_screen_width,
@@ -2356,10 +2447,12 @@ class ProvisioningWizard(tk.Tk):
         )
 
     def _confirm_destructive_provision(self):
+        target = (self.answers.get("boot_target_device") or "").strip()
+        target_text = self._boot_target_review_summary() if target else "the selected boot target drive"
         ok = self._inline_yes_no_modal(
             title="Install new system?",
             body=(
-                "This will erase the device's internal storage drive and install a fresh system on it. "
+                f"This will erase {target_text} and install a fresh production system on it. "
                 "That erase step is expected: it clears the target drive so the new setup can be written.\n\n"
                 "If this is a new system, there is probably nothing on that drive to lose. "
                 "If the drive already has data you care about, stop now because that data will be lost.\n\n"
@@ -3561,6 +3654,75 @@ class ProvisioningWizard(tk.Tk):
         )
         self._run_accessory_checks()
 
+    def _step_boot_target_device(self):
+        self._boot_target_rows = []
+        self._boot_target_listbox = None
+        self._add_title("Choose boot target drive")
+        self._add_label(
+            "Select the drive that will receive the production OS. "
+            "This drive will be erased and set as the first boot device. "
+            "The current provisioner drive remains available as fallback."
+        )
+
+        candidates, root_dev = list_boot_target_candidates()
+        self._boot_target_rows = candidates
+        if root_dev:
+            self._add_label(f"Current provisioner (fallback): {root_dev}", fg=MUTED)
+
+        list_outer = tk.Frame(self.content, bg=BG)
+        list_outer.pack(fill="both", expand=True, pady=(0, 10))
+
+        if not candidates:
+            tk.Label(
+                list_outer,
+                text="No boot target drives were found. Connect NVMe, microSD, or USB storage and retry.",
+                bg=BG,
+                fg=ACCENT,
+                font=FONT_LABEL,
+                justify="left",
+                wraplength=760,
+            ).pack(anchor="w")
+            return
+
+        if len(candidates) == 1:
+            self._add_label(
+                f"Only one target found: {format_boot_target_line(candidates[0])}",
+                fg=MUTED,
+            )
+
+        display_lines = [format_boot_target_line(row) for row in candidates]
+        selected_dev = (self.answers.get("boot_target_device") or "").strip()
+        pick_idx = None
+        if selected_dev:
+            for i, row in enumerate(candidates):
+                if row["dev"] == selected_dev:
+                    pick_idx = i
+                    break
+        if pick_idx is None and len(candidates) == 1:
+            pick_idx = 0
+
+        self._boot_target_var, listbox = self._add_listbox(
+            display_lines,
+            "",
+            max_visible_rows=min(8, max(3, len(display_lines))),
+            parent=list_outer,
+            list_frame_pack={"fill": "both", "expand": True},
+            clamp_height_to_entries=False,
+            selected_listbox_index=pick_idx,
+        )
+        self._boot_target_listbox = listbox
+        listbox.bind("<<ListboxSelect>>", self._on_boot_target_list_select, add="+")
+
+    def _on_boot_target_list_select(self, _event=None):
+        if not self._boot_target_listbox or not self._boot_target_rows:
+            return
+        selection = self._boot_target_listbox.curselection()
+        if not selection:
+            return
+        idx = selection[0]
+        if 0 <= idx < len(self._boot_target_rows):
+            self.answers["boot_target_device"] = self._boot_target_rows[idx]["dev"]
+
     def _step_hostname(self):
         self._add_title("Name this device")
         self._add_label(
@@ -3771,6 +3933,7 @@ class ProvisioningWizard(tk.Tk):
             ("Wi-Fi test", self._wifi_test_summary()),
             ("Network / connectivity", self._connectivity_review_summary()),
             ("Accessory checks", self._accessory_check_summary()),
+            ("Boot target", self._boot_target_review_summary()),
             ("Timezone", self.answers.get("timezone", "")),
             ("Locale", self.answers.get("locale", "")),
             ("Screen width (px)", self.answers.get("screen_pixels_width", "")),
@@ -3871,6 +4034,16 @@ class ProvisioningWizard(tk.Tk):
             summary += f"; missing: {', '.join(missing)}"
         return summary
 
+    def _boot_target_review_summary(self):
+        dev = (self.answers.get("boot_target_device") or "").strip()
+        if not dev:
+            return "(not selected)"
+        candidates, _root_dev = list_boot_target_candidates()
+        for row in candidates:
+            if row.get("dev") == dev:
+                return format_boot_target_line(row)
+        return dev
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
@@ -3910,6 +4083,36 @@ class ProvisioningWizard(tk.Tk):
                 self._show_styled_error_modal("Invalid", "Wi-Fi country must be 2 letters like US.")
                 return False
             self.answers["wifi_country"] = value
+
+        elif step_name == "_step_accessory_checks":
+            return True
+
+        elif step_name == "_step_boot_target_device":
+            candidates, _root_dev = list_boot_target_candidates()
+            self._boot_target_rows = candidates
+            if not candidates:
+                self._show_styled_error_modal(
+                    "No boot target",
+                    "No boot target drives were found. Connect NVMe, microSD, or USB storage and retry.",
+                )
+                return False
+            if len(candidates) == 1:
+                self.answers["boot_target_device"] = candidates[0]["dev"]
+                return True
+            selection = (
+                self._boot_target_listbox.curselection()
+                if getattr(self, "_boot_target_listbox", None) is not None
+                else ()
+            )
+            if not selection:
+                self._show_styled_error_modal("Required", "Please select the boot target drive.")
+                return False
+            idx = selection[0]
+            if idx < 0 or idx >= len(candidates):
+                self._show_styled_error_modal("Invalid", "Please select a valid boot target drive.")
+                return False
+            self.answers["boot_target_device"] = candidates[idx]["dev"]
+            return True
 
         elif step_name == "_step_timezone":
             value = self._timezone_var.get().strip() or DEFAULT_TIMEZONE

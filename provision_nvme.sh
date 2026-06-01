@@ -59,6 +59,7 @@ ANSWER_MONITOR_HEIGHT_CM=""
 ANSWER_MONITOR_DISTANCE_CM=""
 ANSWER_CONFIRM_ERASE=""
 ANSWER_NVME_DEVICE=""
+ANSWER_BOOT_TARGET_DEVICE=""
 ANSWER_ALLOW_POSSIBLE_SD=""
 ANSWER_CONNECTIVITY_CONTINUE_ANYWAY=""
 ANSWER_ACCESSORY_CHECKS_JSON=""
@@ -498,6 +499,7 @@ keys = {
     "ANSWER_MONITOR_DISTANCE_CM": "monitor_distance_cm",
     "ANSWER_CONFIRM_ERASE": "confirm_erase",
     "ANSWER_NVME_DEVICE": "nvme_device",
+    "ANSWER_BOOT_TARGET_DEVICE": "boot_target_device",
     "ANSWER_ALLOW_POSSIBLE_SD": "allow_possible_sd",
     "ANSWER_CONNECTIVITY_CONTINUE_ANYWAY": "connectivity_continue_anyway",
     "ANSWER_CLOUD_TRIAL_INGEST": "cloud_trial_ingest",
@@ -1573,10 +1575,195 @@ strip_partition_suffix() {
   fi
 }
 
-check_root_on_fallback_and_nvme_present() {
-  local root_src root_dev
+# Boot-order helpers — keep in sync with provision_emmc_for_nvme_fallback.sh
+device_boot_nibble() {
+  local dev="$1"
+  case "$dev" in
+    /dev/nvme*)
+      echo 6
+      return 0
+      ;;
+    /dev/mmcblk*)
+      echo 1
+      return 0
+      ;;
+    /dev/sd*)
+      local tran rm
+      tran="$(lsblk -dn -o TRAN "$dev" 2>/dev/null | head -n1 || true)"
+      rm="$(lsblk -dn -o RM "$dev" 2>/dev/null | head -n1 || true)"
+      if [[ "$tran" == "usb" || "$rm" == "1" ]]; then
+        echo 4
+        return 0
+      fi
+      die "Unknown boot mode for block device: $dev"
+      ;;
+    *)
+      die "Unsupported block device for boot order: $dev"
+      ;;
+  esac
+}
+
+boot_order_label() {
+  case "$1" in
+    1) echo "microSD/eMMC" ;;
+    4) echo "USB" ;;
+    6) echo "NVMe" ;;
+    *) echo "unknown($1)" ;;
+  esac
+}
+
+boot_order_for_devices() {
+  local primary_dev="$1"
+  local fallback_dev="$2"
+  local primary_nibble fallback_nibble
+
+  [[ "$primary_dev" != "$fallback_dev" ]] || die "Primary and fallback devices must differ: $primary_dev"
+  primary_nibble="$(device_boot_nibble "$primary_dev")"
+  fallback_nibble="$(device_boot_nibble "$fallback_dev")"
+  printf '0x%x' $((0xf00 | (fallback_nibble << 4) | primary_nibble))
+}
+
+set_eeprom_boot_order() {
+  local primary_dev="$1"
+  local fallback_dev="$2"
+  local boot_order primary_nibble fallback_nibble need_pcie=0
+  local primary_label fallback_label editor
+
+  boot_order="$(boot_order_for_devices "$primary_dev" "$fallback_dev")"
+  primary_nibble="$(device_boot_nibble "$primary_dev")"
+  fallback_nibble="$(device_boot_nibble "$fallback_dev")"
+  primary_label="$(boot_order_label "$primary_nibble")"
+  fallback_label="$(boot_order_label "$fallback_nibble")"
+  [[ "$primary_nibble" == "6" || "$fallback_nibble" == "6" ]] && need_pcie=1
+
+  need_cmd rpi-eeprom-update
+  need_cmd rpi-eeprom-config
+
+  log "Updating EEPROM package + applying latest EEPROM update (if available)..."
+  rpi-eeprom-update -a || true
+
+  log "Setting EEPROM BOOT_ORDER to ${boot_order} (${primary_label} first, ${fallback_label} fallback)..."
+
+  editor="/tmp/hb_rpi_eeprom_editor.sh"
+  {
+    cat <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+f="$1"
+
+ensure_kv() {
+  local key="$1" val="$2"
+  if grep -qE "^${key}=" "$f"; then
+    sed -i -E "s/^${key}=.*/${key}=${val}/" "$f"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$f"
+  fi
+}
+EOF
+    printf 'ensure_kv "BOOT_ORDER" "%s"\n' "$boot_order"
+    if [[ "$need_pcie" == "1" ]]; then
+      echo 'ensure_kv "PCIE_PROBE" "1"'
+    fi
+  } > "$editor"
+  chmod +x "$editor"
+
+  if EDITOR="$editor" rpi-eeprom-config --edit >/dev/null 2>&1; then
+    :
+  elif EDITOR="$editor" rpi-eeprom-config -e >/dev/null 2>&1; then
+    :
+  else
+    log "WARNING: Could not non-interactively edit EEPROM config."
+    log "You can run manually:"
+    log "  sudo rpi-eeprom-config -e"
+    log "and set:"
+    log "  BOOT_ORDER=${boot_order}"
+    if [[ "$need_pcie" == "1" ]]; then
+      log "  PCIE_PROBE=1"
+    fi
+  fi
+}
+
+classify_boot_target_device() {
+  local dev="$1"
+  local name="${dev##*/}"
+  local tran rm
+  tran="$(lsblk -dn -o TRAN "$dev" 2>/dev/null | head -n1 || true)"
+  rm="$(lsblk -dn -o RM "$dev" 2>/dev/null | head -n1 || true)"
+
+  if [[ "$name" =~ ^nvme ]]; then
+    echo "NVMe"
+    return 0
+  fi
+  if compgen -G "${dev}boot0" >/dev/null; then
+    echo "eMMC"
+    return 0
+  fi
+  if [[ "$name" =~ ^mmcblk[0-9]+$ ]]; then
+    echo "microSD/MMC"
+    return 0
+  fi
+  if [[ "$tran" == "usb" || "$rm" == "1" ]]; then
+    echo "USB"
+    return 0
+  fi
+  echo "block"
+}
+
+list_boot_target_candidates() {
+  local root_dev="$1"
+  local line name type size model tran rm dev class
+  while read -r line; do
+    [[ -n "$line" ]] || continue
+    NAME=""; TYPE=""; SIZE=""; MODEL=""; TRAN=""; RM=""
+    eval "$line"
+
+    name="${NAME:-}"
+    type="${TYPE:-}"
+    size="${SIZE:-}"
+    model="${MODEL:-}"
+    tran="${TRAN:-}"
+    rm="${RM:-}"
+    [[ "$type" == "disk" ]] || continue
+    [[ -n "$name" ]] || continue
+
+    case "$name" in
+      loop*|zram*|ram*|sr*)
+        continue
+        ;;
+    esac
+
+    if [[ ! "$name" =~ ^mmcblk[0-9]+$ && ! "$name" =~ ^sd[a-z]+$ && ! "$name" =~ ^nvme ]]; then
+      continue
+    fi
+
+    dev="/dev/${name}"
+    if [[ -n "$root_dev" && "$dev" == "$root_dev" ]]; then
+      continue
+    fi
+
+    class="$(classify_boot_target_device "$dev")"
+    echo "${dev}|${size}|${model}|${class}|${tran}|${rm}"
+  done < <(lsblk -dn -P -o NAME,TYPE,SIZE,MODEL,TRAN,RM)
+}
+
+configured_boot_target_device() {
+  if [[ -n "$ANSWER_BOOT_TARGET_DEVICE" ]]; then
+    echo "$ANSWER_BOOT_TARGET_DEVICE"
+    return 0
+  fi
+  if [[ -n "$ANSWER_NVME_DEVICE" ]]; then
+    echo "$ANSWER_NVME_DEVICE"
+    return 0
+  fi
+  echo ""
+}
+
+check_root_on_fallback_and_target_present() {
+  local root_dev="$1"
+  local root_src
+
   root_src="$(root_source)"
-  root_dev="$(strip_partition_suffix "$root_src")"
+  [[ -n "$root_dev" ]] || root_dev="$(strip_partition_suffix "$root_src")"
 
   log "Root filesystem source: $root_src"
   log "Root block device: $root_dev"
@@ -1597,39 +1784,62 @@ check_root_on_fallback_and_nvme_present() {
       ;;
   esac
 
-  if ! lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}' | grep -q '^nvme'; then
-    die "No NVMe disk detected (expected /dev/nvme*)."
-  fi
+  local candidates=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    candidates+=("${line%%|*}")
+  done < <(list_boot_target_candidates "$root_dev")
+
+  [[ "${#candidates[@]}" -gt 0 ]] || die "No boot target disks found (expected NVMe, microSD/eMMC, or USB mass storage)."
 }
 
-pick_nvme_device() {
-  local candidates
-  mapfile -t candidates < <(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print "/dev/"$1}' | grep '^/dev/nvme' || true)
-  [[ "${#candidates[@]}" -gt 0 ]] || die "No NVMe disks found."
+pick_boot_target_device() {
+  local root_dev="$1"
+  local entries=() configured candidate
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    entries+=("$line")
+  done < <(list_boot_target_candidates "$root_dev")
 
-  if [[ -n "$ANSWER_NVME_DEVICE" ]]; then
-    [[ -b "$ANSWER_NVME_DEVICE" ]] || die "Configured NVMe target is not a block device: $ANSWER_NVME_DEVICE"
-    local candidate
-    for candidate in "${candidates[@]}"; do
-      if [[ "$candidate" == "$ANSWER_NVME_DEVICE" ]]; then
-        echo "$ANSWER_NVME_DEVICE"
+  [[ "${#entries[@]}" -gt 0 ]] || die "No boot target disks found."
+
+  configured="$(configured_boot_target_device)"
+  if [[ -n "$configured" ]]; then
+    [[ -b "$configured" ]] || die "Configured boot target is not a block device: $configured"
+    if [[ "$configured" == "$root_dev" ]]; then
+      die "Configured boot target '$configured' is the current root device; pick a different drive."
+    fi
+    for candidate in "${entries[@]}"; do
+      if [[ "${candidate%%|*}" == "$configured" ]]; then
+        echo "$configured"
         return 0
       fi
     done
-    die "Configured NVMe target '$ANSWER_NVME_DEVICE' is not one of the detected NVMe disks."
+    die "Configured boot target '$configured' is not one of the detected boot target disks."
   fi
 
-  if [[ "${#candidates[@]}" -eq 1 ]]; then
-    echo "${candidates[0]}"
+  if [[ "${#entries[@]}" -eq 1 ]]; then
+    local one_dev one_size one_model one_class
+    IFS="|" read -r one_dev one_size one_model one_class _ <<< "${entries[0]}"
+    log "Detected one boot target: ${one_dev} (${one_class}, ${one_size:-unknown}${one_model:+, ${one_model}})"
+    echo "$one_dev"
     return 0
   fi
 
-  log "Multiple NVMe disks found:"
-  local i
-  for i in "${!candidates[@]}"; do
-    echo "  [$i] ${candidates[$i]}"
+  log "Multiple boot target disks found:"
+  local i line dev size model class tran rm
+  for i in "${!entries[@]}"; do
+    line="${entries[$i]}"
+    IFS="|" read -r dev size model class tran rm <<< "$line"
+    printf '  [%d] %s (%s, %s%s%s)\n' \
+      "$i" \
+      "$dev" \
+      "${class:-block}" \
+      "${size:-unknown size}" \
+      "${model:+, ${model}}" \
+      "${tran:+, transport=${tran}}" >&2
   done
-  die "Multiple NVMe disks were detected. Add nvme_device to the answers JSON."
+  die "Multiple boot target disks were detected. Add boot_target_device to the answers JSON."
 }
 
 confirm_erase_device() {
@@ -1826,8 +2036,21 @@ find_nvme_partition() {
   fi
 
   case "$want" in
-    boot) echo "${dev}p1" ;;
-    root) echo "${dev}p2" ;;
+    boot) partition_path_for_disk "$dev" 1 ;;
+    root) partition_path_for_disk "$dev" 2 ;;
+  esac
+}
+
+partition_path_for_disk() {
+  local dev="$1"
+  local part_num="$2"
+  case "$dev" in
+    /dev/mmcblk*|/dev/nvme*)
+      echo "${dev}p${part_num}"
+      ;;
+    *)
+      echo "${dev}${part_num}"
+      ;;
   esac
 }
 
@@ -2616,49 +2839,6 @@ configure_raspi_config_root() {
   unmount_chroot_env "$root_mnt"
 }
 
-set_eeprom_boot_to_nvme() {
-  need_cmd rpi-eeprom-update
-  need_cmd rpi-eeprom-config
-
-  log "Updating EEPROM package + applying latest EEPROM update (if available)..."
-  rpi-eeprom-update -a || true
-
-  log "Setting EEPROM BOOT_ORDER to prefer NVMe (BOOT_ORDER=0xf416) and PCIE_PROBE=1 ..."
-
-  local editor="/tmp/hb_rpi_eeprom_editor.sh"
-  cat > "$editor" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-f="$1"
-
-ensure_kv() {
-  local key="$1" val="$2"
-  if grep -qE "^${key}=" "$f"; then
-    sed -i -E "s/^${key}=.*/${key}=${val}/" "$f"
-  else
-    printf '%s=%s\n' "$key" "$val" >> "$f"
-  fi
-}
-
-ensure_kv "BOOT_ORDER" "0xf416"
-ensure_kv "PCIE_PROBE" "1"
-EOF
-  chmod +x "$editor"
-
-  if EDITOR="$editor" rpi-eeprom-config --edit >/dev/null 2>&1; then
-    :
-  elif EDITOR="$editor" rpi-eeprom-config -e >/dev/null 2>&1; then
-    :
-  else
-    log "WARNING: Could not non-interactively edit EEPROM config."
-    log "You can run manually:"
-    log "  sudo rpi-eeprom-config -e"
-    log "and set:"
-    log "  BOOT_ORDER=0xf416"
-    log "  PCIE_PROBE=1"
-  fi
-}
-
 wait_for_gui_reboot_request() {
   rm -f "$HB_REBOOT_REQUEST_FILE"
   log "$HB_PROVISION_COMPLETE_MARKER"
@@ -2695,7 +2875,7 @@ main() {
   local wifi_country timezone locale screen_w screen_h screen_r screen_rot
   local wifi_ssid="" wifi_pass="" wifi_hidden=""
   local hostname username password
-  local nvme_dev
+  local root_src root_dev target_dev
   local monitor_width monitor_height monitor_distance
 
   wifi_country="$ANSWER_WIFI_COUNTRY"
@@ -2737,28 +2917,33 @@ main() {
   monitor_distance="$ANSWER_MONITOR_DISTANCE_CM"
 
   check_bookworm_or_later
-  check_root_on_fallback_and_nvme_present
-  nvme_dev="$(pick_nvme_device)"
-  [[ -b "$nvme_dev" ]] || die "Not a block device: $nvme_dev"
-  confirm_erase_device "$nvme_dev"
+  root_src="$(root_source)"
+  root_dev="$(strip_partition_suffix "$root_src")"
+  check_root_on_fallback_and_target_present "$root_dev"
+  target_dev="$(pick_boot_target_device "$root_dev")"
+  [[ -b "$target_dev" ]] || die "Not a block device: $target_dev"
+  if [[ "$target_dev" == "$root_dev" ]]; then
+    die "Refusing to overwrite the current root device ($root_dev)."
+  fi
+  confirm_erase_device "$target_dev"
 
   install_packages_host
 
   local xz_path="/tmp/raspios_lite_arm64_latest.img.xz"
   download_image_xz "$xz_path"
-  write_image_to_nvme "$xz_path" "$nvme_dev"
+  write_image_to_nvme "$xz_path" "$target_dev"
 
-  wait_for_partitions "$nvme_dev"
+  wait_for_partitions "$target_dev"
   local boot_part root_part
-  boot_part="$(find_nvme_partition "$nvme_dev" boot)"
-  root_part="$(find_nvme_partition "$nvme_dev" root)"
+  boot_part="$(find_nvme_partition "$target_dev" boot)"
+  root_part="$(find_nvme_partition "$target_dev" root)"
   [[ -b "$boot_part" ]] || die "Boot partition not found: $boot_part"
   [[ -b "$root_part" ]] || die "Root partition not found: $root_part"
 
-  log "NVMe boot partition: $boot_part"
-  log "NVMe root partition: $root_part"
+  log "Target boot partition: $boot_part"
+  log "Target root partition: $root_part"
 
-  expand_nvme_root_partition "$nvme_dev" "$root_part"
+  expand_nvme_root_partition "$target_dev" "$root_part"
   fsck_nvme_partitions "$boot_part" "$root_part"
 
   HB_BOOT_MNT="/mnt/hb_nvme_boot"
@@ -2793,7 +2978,7 @@ main() {
   cleanup_mounts "$HB_BOOT_MNT" "$HB_ROOT_MNT"
   trap - EXIT
 
-  set_eeprom_boot_to_nvme
+  set_eeprom_boot_order "$target_dev" "$root_dev"
 
   wait_for_gui_reboot_request
 }
