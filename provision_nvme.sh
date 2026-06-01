@@ -677,7 +677,15 @@ validate_answers() {
   validate_positive_number "monitor_height_cm" "$ANSWER_MONITOR_HEIGHT_CM"
   validate_positive_number "monitor_distance_cm" "$ANSWER_MONITOR_DISTANCE_CM"
 
-  [[ "$ANSWER_CONFIRM_ERASE" == "ERASE" ]] || die "Missing destructive confirmation. Expected confirm_erase to equal ERASE."
+  local root_dev candidate_count=0 line
+  root_dev="$(strip_partition_suffix "$(root_source)")"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    candidate_count=$((candidate_count + 1))
+  done < <(list_boot_target_candidates "$root_dev")
+  if [[ "$candidate_count" -gt 1 ]]; then
+    [[ "$ANSWER_CONFIRM_ERASE" == "ERASE" ]] || die "Missing destructive confirmation. Expected confirm_erase to equal ERASE."
+  fi
   if [[ -n "$ANSWER_ALLOW_POSSIBLE_SD" ]]; then
     [[ "$ANSWER_ALLOW_POSSIBLE_SD" == "YES" || "$ANSWER_ALLOW_POSSIBLE_SD" == "true" ]] || die "allow_possible_sd must be YES or true when provided."
   fi
@@ -1844,9 +1852,25 @@ pick_boot_target_device() {
 
 confirm_erase_device() {
   local dev="$1"
+  local root_dev="$2"
   log "About to ERASE and overwrite the entire disk: $dev"
   log "This is destructive. All data on $dev will be lost."
-  [[ "$ANSWER_CONFIRM_ERASE" == "ERASE" ]] || die "Answers JSON did not confirm ERASE."
+  if [[ "$ANSWER_CONFIRM_ERASE" == "ERASE" ]]; then
+    return 0
+  fi
+
+  local candidate_count=0 line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    candidate_count=$((candidate_count + 1))
+  done < <(list_boot_target_candidates "$root_dev")
+  if [[ "$candidate_count" -le 1 ]]; then
+    log "Single boot target detected; proceeding without explicit ERASE confirmation."
+    ANSWER_CONFIRM_ERASE="ERASE"
+    return 0
+  fi
+
+  die "Answers JSON did not confirm ERASE."
 }
 
 install_packages_host() {
@@ -2925,7 +2949,7 @@ main() {
   if [[ "$target_dev" == "$root_dev" ]]; then
     die "Refusing to overwrite the current root device ($root_dev)."
   fi
-  confirm_erase_device "$target_dev"
+  confirm_erase_device "$target_dev" "$root_dev"
 
   install_packages_host
 

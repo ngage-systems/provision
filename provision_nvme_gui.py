@@ -697,6 +697,19 @@ def format_boot_target_line(row):
     return " ".join(parts)
 
 
+def boot_target_choice_required():
+    candidates, _root_dev = list_boot_target_candidates()
+    return len(candidates) > 1
+
+
+def ensure_boot_target_device_answer(answers):
+    if (answers.get("boot_target_device") or "").strip():
+        return
+    candidates, _root_dev = list_boot_target_candidates()
+    if len(candidates) == 1:
+        answers["boot_target_device"] = candidates[0]["dev"]
+
+
 def check_accessories():
     lsusb_result = run_command(["lsusb"], timeout=5)
     lsusb_output = lsusb_result.stdout if lsusb_result.returncode == 0 else ""
@@ -2197,6 +2210,10 @@ class ProvisioningWizard(tk.Tk):
             if name == "_step_cloud_trial_ingest" and not self._defaults_group_cloud_data_store_enabled():
                 next_index += 1
                 continue
+            if name == "_step_boot_target_device" and not boot_target_choice_required():
+                ensure_boot_target_device_answer(self.answers)
+                next_index += 1
+                continue
             break
         return next_index
 
@@ -2211,6 +2228,9 @@ class ProvisioningWizard(tk.Tk):
                 previous_index -= 1
                 continue
             if name == "_step_cloud_trial_ingest" and not self._defaults_group_cloud_data_store_enabled():
+                previous_index -= 1
+                continue
+            if name == "_step_boot_target_device" and not boot_target_choice_required():
                 previous_index -= 1
                 continue
             break
@@ -2447,6 +2467,11 @@ class ProvisioningWizard(tk.Tk):
         )
 
     def _confirm_destructive_provision(self):
+        ensure_boot_target_device_answer(self.answers)
+        if not boot_target_choice_required():
+            self.answers["confirm_erase"] = "ERASE"
+            return True
+
         target = (self.answers.get("boot_target_device") or "").strip()
         target_text = self._boot_target_review_summary() if target else "the selected boot target drive"
         ok = self._inline_yes_no_modal(
