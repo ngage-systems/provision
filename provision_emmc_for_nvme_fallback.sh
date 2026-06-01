@@ -164,23 +164,16 @@ ini_get() {
   ' "$file"
 }
 
-mesh_workgroup_for_defaults_group() {
-  local group="$1"
-  local file="$2"
-  local wg
-  wg="$(ini_get "$file" "$group" "mesh_workgroup")"
-  if [[ -n "$wg" ]]; then
-    echo "$wg"
-    return 0
-  fi
-  echo "${group//./-}"
+source_trial_ingest_lib() {
+  local script_path script_dir lib
+  script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+  script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
+  lib="${script_dir}/trial_ingest_lib.sh"
+  [[ -r "$lib" ]] || die "Missing shared library: $lib"
+  # shellcheck source=trial_ingest_lib.sh
+  source "$lib"
 }
-
-cloud_registry_url_for_defaults_group() {
-  local group="$1"
-  local file="$2"
-  ini_get "$file" "$group" "cloud_registry"
-}
+source_trial_ingest_lib
 
 resolve_defaults_file() {
   local script_path script_dir
@@ -950,84 +943,6 @@ EOF
   fi
 }
 
-print_trial_ingest_secret_banner() {
-  local secret="$1"
-  {
-    echo ""
-    echo "================================================================"
-    echo "WARNING: Cloud registry registration failed."
-    echo "Create the writer row manually using this passkey:"
-    echo "$secret"
-    echo "Stored on fallback OS at: ${HB_TRIAL_INGEST_SECRET}"
-    echo "================================================================"
-    echo ""
-  } >&2
-}
-
-register_trial_ingest_writer() {
-  local registry_url="$1"
-  local mesh_workgroup="$2"
-  local hostname="$3"
-  local passkey="$4"
-
-  need_cmd curl
-  need_cmd python3
-
-  log "Registering trial ingest writer with cloud registry..."
-
-  local json_body
-  json_body="$(python3 -c '
-import json, sys
-print(json.dumps({
-    "workgroup": sys.argv[1],
-    "user": sys.argv[2],
-    "pass": sys.argv[3],
-    "role": "writer",
-}))
-' "$mesh_workgroup" "$hostname" "$passkey")"
-
-  local tmp_response http_code response
-  tmp_response="$(mktemp)"
-  if ! http_code="$(curl -sS --connect-timeout 10 --max-time 30 -o "$tmp_response" -w '%{http_code}' -X POST "$registry_url" \
-    -H 'Content-Type: application/json' \
-    --data "$json_body")"; then
-    rm -f "$tmp_response"
-    log "WARNING: Cloud registry request failed (network, DNS, or TLS error)."
-    return 1
-  fi
-  response="$(cat "$tmp_response")"
-  rm -f "$tmp_response"
-
-  local parse_result
-  parse_result="$(RESPONSE="$response" HTTP_CODE="$http_code" python3 -c '
-import json, os, sys
-
-raw = os.environ.get("RESPONSE", "")
-code = os.environ.get("HTTP_CODE", "")
-try:
-    body = json.loads(raw) if raw.strip() else {}
-except json.JSONDecodeError:
-    snippet = raw[:200].replace("\n", " ")
-    print(f"ERROR|Cloud registry returned non-JSON (HTTP {code}): {snippet}")
-    sys.exit(0)
-if body.get("ok"):
-    writer_id = body.get("writer_id", "?")
-    workgroup = body.get("workgroup", "?")
-    print(f"OK|writer_id={writer_id} workgroup={workgroup}")
-else:
-    err = body.get("error", "unknown")
-    msg = body.get("message", raw[:200])
-    print(f"ERROR|HTTP {code}: {err}: {msg}")
-')"
-
-  if [[ "${parse_result%%|*}" == "OK" ]]; then
-    log "Trial ingest writer registered (${parse_result#*|}; inactive until activated in MySQL)."
-    return 0
-  fi
-  log "WARNING: ${parse_result#*|}"
-  return 1
-}
-
 write_fallback_config() {
   local boot_mnt="$1"
   local root_mnt="$2"
@@ -1176,10 +1091,7 @@ EOF
   fi
 
   log "Writing trial ingest secret on fallback root..."
-  install -d -m 0755 -o root -g root "${root_mnt}/etc/dserv"
-  printf '%s\n' "$trial_ingest_secret" > "${root_mnt}${HB_TRIAL_INGEST_SECRET}"
-  chown root:root "${root_mnt}${HB_TRIAL_INGEST_SECRET}"
-  chmod 0600 "${root_mnt}${HB_TRIAL_INGEST_SECRET}"
+  write_trial_ingest_secret "$trial_ingest_secret" "$root_mnt"
 }
 
 main() {

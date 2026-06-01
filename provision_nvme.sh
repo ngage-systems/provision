@@ -261,11 +261,16 @@ ini_get() {
   ' "$file"
 }
 
-cloud_ingest_url_for_defaults_group() {
-  local group="$1"
-  local file="$2"
-  ini_get "$file" "$group" "cloud_ingest"
+source_trial_ingest_lib() {
+  local script_path script_dir lib
+  script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+  script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
+  lib="${script_dir}/trial_ingest_lib.sh"
+  [[ -r "$lib" ]] || die "Missing shared library: $lib"
+  # shellcheck source=trial_ingest_lib.sh
+  source "$lib"
 }
+source_trial_ingest_lib
 
 select_defaults_section() {
   local file="$1"
@@ -2736,52 +2741,28 @@ install_dserv_stack_root() {
 sync_trial_ingest_secret_to_nvme_root() {
   local root_mnt="$1"
   local host_file="$HB_TRIAL_INGEST_SECRET"
-  local dest="${root_mnt}${HB_TRIAL_INGEST_SECRET}"
 
   if [[ ! -f "$host_file" ]]; then
     log "WARNING: Host trial ingest secret not found at ${host_file}; skipping copy to NVMe rootfs."
     return 0
   fi
 
-  local line tmp
-  line="$(head -n1 "$host_file" | tr -d '\r')"
+  local line
+  line="$(read_trial_ingest_secret "" 2>/dev/null || true)"
   if [[ -z "$line" ]]; then
     log "WARNING: Host trial ingest secret at ${host_file} is empty; skipping copy to NVMe rootfs."
     return 0
   fi
 
-  tmp="$(mktemp -p /tmp hb_trial_secret.XXXXXX)"
-  chmod 0600 "$tmp" || true
-  printf '%s\n' "$line" > "$tmp"
-
-  install -d -m 0755 -o root -g root "${root_mnt}/etc/dserv"
-  install -m 0600 -o root -g root "$tmp" "$dest"
-  rm -f "$tmp"
+  write_trial_ingest_secret "$line" "$root_mnt"
   log "Installed trial ingest secret from host into NVMe rootfs."
 }
 
 configure_trial_ingest_pre_remoteservers_root() {
   local root_mnt="$1"
-  local dir="${root_mnt}/usr/local/dserv/local"
-  local target="${dir}/pre-remoteservers.tcl"
-  local example="${dir}/pre-remoteservers.tcl.EXAMPLE"
 
   if [[ "${ANSWER_CLOUD_TRIAL_INGEST:-false}" != "true" ]]; then
     return 0
-  fi
-
-  install -d -m 0755 -o root -g root "$dir" || true
-
-  if [[ ! -f "$target" ]]; then
-    if [[ -f "$example" ]]; then
-      if ! cp "$example" "$target"; then
-        log "WARNING: Could not copy ${example} to ${target}; skipping trial ingest URL config."
-        return 0
-      fi
-    else
-      log "WARNING: ${example} not found; creating empty ${target} for trial ingest line."
-      : >"$target" || true
-    fi
   fi
 
   local defaults_file="${DEFAULTS_FILE:-}"
@@ -2796,29 +2777,8 @@ configure_trial_ingest_pre_remoteservers_root() {
   if [[ -z "$group" && -n "${DEFAULTS_SECTION:-}" ]]; then
     group="${DEFAULTS_SECTION%.*}"
   fi
-  if [[ -z "$group" ]]; then
-    log "WARNING: No defaults group available; skipping trial ingest URL in pre-remoteservers.tcl."
-    return 0
-  fi
 
-  local cloud_ingest_url
-  cloud_ingest_url="$(cloud_ingest_url_for_defaults_group "$group" "$defaults_file")"
-  if [[ -z "$cloud_ingest_url" ]]; then
-    log "WARNING: cloud_ingest not set for section ${group} in ${defaults_file}; skipping trial ingest URL in pre-remoteservers.tcl."
-    return 0
-  fi
-
-  if grep -qE '^[[:space:]]*dservSet[[:space:]]+configs/trial_ingest_base_url' "$target" 2>/dev/null; then
-    return 0
-  fi
-
-  if [[ -s "$target" ]] && [[ "$(tail -c1 "$target" 2>/dev/null)" != $'\n' ]]; then
-    printf '\n' >>"$target" || true
-  fi
-  cat >>"$target" <<EOF
-dservSet configs/trial_ingest_base_url {${cloud_ingest_url}}
-EOF
-  log "Appended trial ingest base URL (${cloud_ingest_url}) to pre-remoteservers.tcl"
+  configure_trial_ingest_pre_remoteservers "$root_mnt" "$group" "$defaults_file"
 }
 
 install_ess_repo_root() {
