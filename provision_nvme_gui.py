@@ -6,9 +6,10 @@ This replaces the old interactive shell questions with a touch-friendly flow.
 It collects answers, validates Wi-Fi when requested, writes JSON output, and
 launches provision_nvme.sh after the user confirms the destructive erase step.
 
-Disable automatic git fetch/merge to refresh this repo before the wizard runs with
-``--no-self-update`` or environment ``HB_PROVISION_NO_SELF_UPDATE=1`` (same as
-provision_nvme.sh).
+Disable automatic git fetch/merge before the wizard runs with ``--no-self-update``
+or ``HB_PROVISION_NO_SELF_UPDATE=1``. The same setting is passed to
+``provision_nvme.sh`` as ``--no-self-update`` when the GUI launches the backend
+(so ``sudo`` does not strip it).
 
 Set ``HB_DEBUG_MODAL_EVENTS=1`` for short ``[pv]`` traces (modal focus/grab, pointer
 hits on Wi‑Fi/install Yes/No, ``next``, choices). Includes ``focusin dialog`` and
@@ -606,6 +607,109 @@ def detect_camera():
     return accessory_result(False, detail)
 
 
+def strip_partition_suffix(src):
+    src = (src or "").strip()
+    if re.fullmatch(r"/dev/mmcblk\d+p\d+", src):
+        return re.sub(r"p\d+$", "", src)
+    if re.fullmatch(r"/dev/nvme\d+n\d+p\d+", src):
+        return re.sub(r"p\d+$", "", src)
+    return re.sub(r"\d+$", "", src)
+
+
+def root_block_device():
+    result = run_command(["findmnt", "-n", "-o", "SOURCE", "/"], timeout=5)
+    if result.returncode != 0:
+        return ""
+    src = (result.stdout or "").strip()
+    if src.startswith("/dev/"):
+        return strip_partition_suffix(src)
+    return ""
+
+
+def classify_boot_target_device(dev, tran="", rm=""):
+    name = Path(dev).name
+    if name.startswith("nvme"):
+        return "NVMe"
+    boot0 = Path(f"{dev}boot0")
+    if boot0.exists():
+        return "eMMC"
+    if re.fullmatch(r"mmcblk\d+", name):
+        return "microSD/MMC"
+    if tran == "usb" or rm == "1":
+        return "USB"
+    return "block"
+
+
+def list_boot_target_candidates():
+    root_dev = root_block_device()
+    result = run_command(
+        ["lsblk", "-dn", "-P", "-o", "NAME,TYPE,SIZE,MODEL,TRAN,RM"],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return [], root_dev
+
+    candidates = []
+    for line in (result.stdout or "").splitlines():
+        fields = {}
+        for match in re.finditer(r'(\w+)="([^"]*)"', line):
+            fields[match.group(1)] = match.group(2)
+        name = fields.get("NAME", "")
+        dev_type = fields.get("TYPE", "")
+        if dev_type != "disk" or not name:
+            continue
+        if re.match(r"^(loop|zram|ram|sr)", name):
+            continue
+        if not (
+            re.fullmatch(r"mmcblk\d+", name)
+            or re.fullmatch(r"sd[a-z]+", name)
+            or name.startswith("nvme")
+        ):
+            continue
+        dev = f"/dev/{name}"
+        if root_dev and dev == root_dev:
+            continue
+        device_class = classify_boot_target_device(
+            dev,
+            tran=fields.get("TRAN", ""),
+            rm=fields.get("RM", ""),
+        )
+        candidates.append(
+            {
+                "dev": dev,
+                "size": fields.get("SIZE", ""),
+                "model": fields.get("MODEL", ""),
+                "class": device_class,
+                "tran": fields.get("TRAN", ""),
+                "rm": fields.get("RM", ""),
+            }
+        )
+    return candidates, root_dev
+
+
+def format_boot_target_line(row):
+    parts = [row["dev"], f"({row['class']}"]
+    if row.get("size"):
+        parts.append(f", {row['size']}")
+    if row.get("model"):
+        parts.append(f", {row['model']}")
+    parts.append(")")
+    return " ".join(parts)
+
+
+def boot_target_choice_required():
+    candidates, _root_dev = list_boot_target_candidates()
+    return len(candidates) > 1
+
+
+def ensure_boot_target_device_answer(answers):
+    if (answers.get("boot_target_device") or "").strip():
+        return
+    candidates, _root_dev = list_boot_target_candidates()
+    if len(candidates) == 1:
+        answers["boot_target_device"] = candidates[0]["dev"]
+
+
 def check_accessories():
     lsusb_result = run_command(["lsusb"], timeout=5)
     lsusb_output = lsusb_result.stdout if lsusb_result.returncode == 0 else ""
@@ -994,7 +1098,23 @@ NM_AGENT_PATH = "/org/freedesktop/NetworkManager/SecretAgent"
 NM_AGENT_MGR_IFACE = "org.freedesktop.NetworkManager.AgentManager"
 NM_AGENT_MGR_PATH = "/org/freedesktop/NetworkManager/AgentManager"
 NM_BUS_NAME = "org.freedesktop.NetworkManager"
-NM_NO_SECRETS_ERROR = "org.freedesktop.NetworkManager.SecretManager.NoSecrets"
+NM_USER_CANCELED_ERROR = "org.freedesktop.NetworkManager.SecretManager.UserCanceled"
+
+
+def wifi_psk_usable_for_password_sync(readback, typed_password):
+    """True when NM readback plausibly differs from the GUI password and is exportable."""
+    if not readback or readback == typed_password:
+        return False
+    if "\n" in readback or "\r" in readback:
+        return False
+    if readback == "--" or readback.lower() in ("<hidden>", "****"):
+        return False
+    if re.fullmatch(r"\*+", readback):
+        return False
+    # 256-bit PMK hex from NM — not the user passphrase we should export.
+    if re.fullmatch(r"[0-9a-fA-F]{64}", readback):
+        return False
+    return 8 <= len(readback) <= 63
 
 
 if _DBUS_AVAILABLE:
@@ -1004,16 +1124,22 @@ if _DBUS_AVAILABLE:
 
         Returns the user-typed PSK on the first GetSecrets call. On any subsequent
         call (or any call carrying the REQUEST_NEW flag, which means NM has
-        already determined the previous secret was wrong) it raises NoSecrets so
-        NetworkManager gives up immediately. This prevents the desktop secret
-        agent (nm-applet et al.) from popping its own dialog and silently
-        substituting a different password than what the user typed in our GUI.
+        already determined the previous secret was wrong) it raises UserCanceled
+        so NetworkManager aborts the secret request instead of asking the next
+        registered agent (desktop nm-applet / Pi network UI), which would let
+        the user substitute a password our wizard never records.
         """
 
         def __init__(self, bus, typed_psk):
             super().__init__(bus, NM_AGENT_PATH)
             self._psk = typed_psk
             self._answered = False
+
+        def _abort_secret_request(self):
+            raise dbus.DBusException(
+                "Secrets request canceled by provisioning agent",
+                name=NM_USER_CANCELED_ERROR,
+            )
 
         @dbus.service.method(
             NM_AGENT_IFACE,
@@ -1023,7 +1149,7 @@ if _DBUS_AVAILABLE:
         def GetSecrets(self, connection, conn_path, setting_name, hints, flags):
             request_new = bool(flags & 0x2)
             if self._answered or request_new:
-                raise dbus.DBusException("No secrets available", name=NM_NO_SECRETS_ERROR)
+                self._abort_secret_request()
             self._answered = True
             if str(setting_name) == "802-11-wireless-security":
                 return {
@@ -1031,7 +1157,7 @@ if _DBUS_AVAILABLE:
                         "psk": dbus.String(self._psk),
                     }
                 }
-            raise dbus.DBusException("No secrets available", name=NM_NO_SECRETS_ERROR)
+            self._abort_secret_request()
 
         @dbus.service.method(NM_AGENT_IFACE, in_signature="os", out_signature="")
         def CancelGetSecrets(self, conn_path, setting_name):
@@ -1074,7 +1200,12 @@ def hb_secret_agent(typed_psk):
         loop = GLib.MainLoop()
         thread = threading.Thread(target=loop.run, daemon=True)
         thread.start()
-    except Exception:
+    except Exception as exc:
+        print(
+            f"WARNING: hb_secret_agent registration failed ({exc}); "
+            "desktop NetworkManager dialog may appear during Wi-Fi test.",
+            file=sys.stderr,
+        )
         if registered and mgr is not None:
             try:
                 mgr.Unregister(dbus_interface=NM_AGENT_MGR_IFACE)
@@ -1332,6 +1463,7 @@ class ProvisioningWizard(tk.Tk):
             self._step_wifi_ssid_manual,
             self._step_wifi_password,
             self._step_accessory_checks,
+            self._step_boot_target_device,
             self._step_timezone,
             self._step_locale,
             self._step_screen_width,
@@ -1345,9 +1477,11 @@ class ProvisioningWizard(tk.Tk):
             self._step_username,
             self._step_password,
             self._step_login_credentials_reminder,
+            self._step_cloud_trial_ingest,
             self._step_review,
         ]
         self.step_index = 0
+        self._cloud_nav_frame = None
         self._restore_resume_state()
         self._maybe_self_update("startup")
 
@@ -2038,12 +2172,29 @@ class ProvisioningWizard(tk.Tk):
         self.btn_next.config(
             text="Finish" if self.step_index == len(self.steps) - 1 else "Next >"
         )
-        if step_name == "_step_accessory_checks":
-            self.btn_recheck_accessories.pack(
-                side="left", padx=(0, 15), before=self.btn_next
-            )
+        self.btn_next.pack_forget()
+        self.btn_recheck_accessories.pack_forget()
+        if getattr(self, "_cloud_nav_frame", None) is not None:
+            self._cloud_nav_frame.destroy()
+            self._cloud_nav_frame = None
+        if step_name == "_step_cloud_trial_ingest":
+            self._cloud_nav_frame = tk.Frame(self.nav_right, bg=BG)
+            self._cloud_nav_frame.pack(side="left")
+            self._make_button(
+                self._cloud_nav_frame,
+                "No",
+                lambda: self._cloud_trial_ingest_chosen(False),
+            ).pack(side="left", padx=(0, 12))
+            self._make_button(
+                self._cloud_nav_frame,
+                "Yes",
+                lambda: self._cloud_trial_ingest_chosen(True),
+                primary=True,
+            ).pack(side="left")
         else:
-            self.btn_recheck_accessories.pack_forget()
+            if step_name == "_step_accessory_checks":
+                self.btn_recheck_accessories.pack(side="left", padx=(0, 15))
+            self.btn_next.pack(side="left")
         self.steps[self.step_index]()
 
     def _next_index(self, index):
@@ -2054,6 +2205,13 @@ class ProvisioningWizard(tk.Tk):
                 next_index += 1
                 continue
             if name == "_step_wifi_password" and not self.answers.get("wifi_ssid"):
+                next_index += 1
+                continue
+            if name == "_step_cloud_trial_ingest" and not self._defaults_group_cloud_data_store_enabled():
+                next_index += 1
+                continue
+            if name == "_step_boot_target_device" and not boot_target_choice_required():
+                ensure_boot_target_device_answer(self.answers)
                 next_index += 1
                 continue
             break
@@ -2069,6 +2227,12 @@ class ProvisioningWizard(tk.Tk):
             if name == "_step_wifi_password" and not self.answers.get("wifi_ssid"):
                 previous_index -= 1
                 continue
+            if name == "_step_cloud_trial_ingest" and not self._defaults_group_cloud_data_store_enabled():
+                previous_index -= 1
+                continue
+            if name == "_step_boot_target_device" and not boot_target_choice_required():
+                previous_index -= 1
+                continue
             break
         return previous_index
 
@@ -2079,8 +2243,12 @@ class ProvisioningWizard(tk.Tk):
         if self._maybe_branch_wifi_network_collection_after_password():
             return
         if self.step_index < len(self.steps) - 1:
-            self.step_index = self._next_index(self.step_index)
-            self._render_current_step()
+            next_idx = self._next_index(self.step_index)
+            if next_idx >= len(self.steps):
+                self._on_finish()
+            else:
+                self.step_index = next_idx
+                self._render_current_step()
         else:
             self._on_finish()
 
@@ -2145,6 +2313,24 @@ class ProvisioningWizard(tk.Tk):
         self.answers["wifi_ssid"] = (first.get("ssid") or "").strip()
         self.answers["wifi_password"] = first.get("password") or ""
         self.answers["wifi_hidden"] = bool(first.get("hidden"))
+
+    def _apply_wifi_test_password_sync(self, typed_password, actual_password):
+        """If NM stored a different usable passphrase, sync wizard state from readback."""
+        if not wifi_psk_usable_for_password_sync(actual_password, typed_password):
+            return typed_password
+        self.answers["wifi_password"] = actual_password
+        var = getattr(self, "_wifi_password_var", None)
+        if var is not None:
+            try:
+                var.set(actual_password)
+            except tk.TclError:
+                pass
+        print(
+            "[pv] Wi-Fi password synced from NetworkManager readback "
+            "(differs from typed value).",
+            file=sys.stderr,
+        )
+        return actual_password
 
     def _restore_wifi_test_state_from_saved_network(self, net):
         """Rebuild flat wifi_test_* answers from a saved wifi_networks row (for UI/review)."""
@@ -2281,10 +2467,17 @@ class ProvisioningWizard(tk.Tk):
         )
 
     def _confirm_destructive_provision(self):
+        ensure_boot_target_device_answer(self.answers)
+        if not boot_target_choice_required():
+            self.answers["confirm_erase"] = "ERASE"
+            return True
+
+        target = (self.answers.get("boot_target_device") or "").strip()
+        target_text = self._boot_target_review_summary() if target else "the selected boot target drive"
         ok = self._inline_yes_no_modal(
             title="Install new system?",
             body=(
-                "This will erase the device's internal storage drive and install a fresh system on it. "
+                f"This will erase {target_text} and install a fresh production system on it. "
                 "That erase step is expected: it clears the target drive so the new setup can be written.\n\n"
                 "If this is a new system, there is probably nothing on that drive to lose. "
                 "If the drive already has data you care about, stop now because that data will be lost.\n\n"
@@ -2309,10 +2502,17 @@ class ProvisioningWizard(tk.Tk):
             return False
 
         provision_wrapper = Path("/usr/local/sbin/hb-provision-nvme")
+        no_self_update = os.environ.get("HB_PROVISION_NO_SELF_UPDATE", "0").strip() == "1"
+        # Sudoers grants NOPASSWD only for hb-provision-nvme — never use "sudo bash …/provision_nvme.sh"
+        # here or sudo waits for a password with no TTY (hang). Pass extra flags via the wrapper ("$@").
         if provision_wrapper.is_file():
             backend_args = ["sudo", "-n", str(provision_wrapper)]
+            if no_self_update:
+                backend_args.append("--no-self-update")
         else:
             backend_args = ["sudo", "bash", str(backend), "--answers", str(self.output_path)]
+            if no_self_update:
+                backend_args.append("--no-self-update")
 
         dialog, status_label, log_text, close_button = self._show_provision_log_window()
         output_queue = queue.Queue()
@@ -2448,6 +2648,20 @@ class ProvisioningWizard(tk.Tk):
                 return mesh_workgroup.replace(".", "-")
 
         return group.replace(".", "-") if group else ""
+
+    def _defaults_group_cloud_data_store_enabled(self):
+        group = self.answers.get("defaults_group", "").strip()
+        if not group or not self.config.has_section(group):
+            return False
+        raw = self.config.get(group, "cloud_data_store", fallback="").strip().lower()
+        return raw in ("yes", "1", "true", "on")
+
+    def _cloud_trial_workgroup_display_name(self):
+        mesh = self._selected_mesh_workgroup()
+        if mesh:
+            return mesh
+        group = self.answers.get("defaults_group", "").strip()
+        return group or "This workgroup"
 
     def _provision_running_message(self):
         message = (
@@ -3465,6 +3679,75 @@ class ProvisioningWizard(tk.Tk):
         )
         self._run_accessory_checks()
 
+    def _step_boot_target_device(self):
+        self._boot_target_rows = []
+        self._boot_target_listbox = None
+        self._add_title("Choose boot target drive")
+        self._add_label(
+            "Select the drive that will receive the production OS. "
+            "This drive will be erased and set as the first boot device. "
+            "The current provisioner drive remains available as fallback."
+        )
+
+        candidates, root_dev = list_boot_target_candidates()
+        self._boot_target_rows = candidates
+        if root_dev:
+            self._add_label(f"Current provisioner (fallback): {root_dev}", fg=MUTED)
+
+        list_outer = tk.Frame(self.content, bg=BG)
+        list_outer.pack(fill="both", expand=True, pady=(0, 10))
+
+        if not candidates:
+            tk.Label(
+                list_outer,
+                text="No boot target drives were found. Connect NVMe, microSD, or USB storage and retry.",
+                bg=BG,
+                fg=ACCENT,
+                font=FONT_LABEL,
+                justify="left",
+                wraplength=760,
+            ).pack(anchor="w")
+            return
+
+        if len(candidates) == 1:
+            self._add_label(
+                f"Only one target found: {format_boot_target_line(candidates[0])}",
+                fg=MUTED,
+            )
+
+        display_lines = [format_boot_target_line(row) for row in candidates]
+        selected_dev = (self.answers.get("boot_target_device") or "").strip()
+        pick_idx = None
+        if selected_dev:
+            for i, row in enumerate(candidates):
+                if row["dev"] == selected_dev:
+                    pick_idx = i
+                    break
+        if pick_idx is None and len(candidates) == 1:
+            pick_idx = 0
+
+        self._boot_target_var, listbox = self._add_listbox(
+            display_lines,
+            "",
+            max_visible_rows=min(8, max(3, len(display_lines))),
+            parent=list_outer,
+            list_frame_pack={"fill": "both", "expand": True},
+            clamp_height_to_entries=False,
+            selected_listbox_index=pick_idx,
+        )
+        self._boot_target_listbox = listbox
+        listbox.bind("<<ListboxSelect>>", self._on_boot_target_list_select, add="+")
+
+    def _on_boot_target_list_select(self, _event=None):
+        if not self._boot_target_listbox or not self._boot_target_rows:
+            return
+        selection = self._boot_target_listbox.curselection()
+        if not selection:
+            return
+        idx = selection[0]
+        if 0 <= idx < len(self._boot_target_rows):
+            self.answers["boot_target_device"] = self._boot_target_rows[idx]["dev"]
+
     def _step_hostname(self):
         self._add_title("Name this device")
         self._add_label(
@@ -3613,6 +3896,24 @@ class ProvisioningWizard(tk.Tk):
                 justify="left",
             ).pack(side="left", fill="x", expand=True)
 
+    def _cloud_trial_ingest_chosen(self, enabled):
+        self.answers["cloud_trial_ingest"] = bool(enabled)
+        self.step_index = self.steps.index(self._step_review)
+        self._render_current_step()
+
+    def _step_cloud_trial_ingest(self):
+        wg = self._cloud_trial_workgroup_display_name()
+        self._add_title("Would you like to store data from this machine in the cloud?")
+        self._add_label(
+            f'{wg} has a secure cloud database available to store data. If you choose "Yes" below, '
+            "it will automatically upload each trial to that cloud database as trials are completed. "
+            "It is not a publicly accessible database, but can be useful for things like real-time "
+            "monitoring of performance and more convenient data analysis. It will only store trial "
+            "parameters and the outcome of those trials (e.g., correct or incorrect, reaction time, etc); "
+            "it does not store photos nor does it store data-intensive fields like eye tracking data. "
+            "If you choose yes, contact ngage-systems for information on how to access these data.",
+        )
+
     def _step_review(self):
         self._add_title("Review setup")
         self._add_label("Check these settings before starting provisioning.")
@@ -3657,6 +3958,7 @@ class ProvisioningWizard(tk.Tk):
             ("Wi-Fi test", self._wifi_test_summary()),
             ("Network / connectivity", self._connectivity_review_summary()),
             ("Accessory checks", self._accessory_check_summary()),
+            ("Boot target", self._boot_target_review_summary()),
             ("Timezone", self.answers.get("timezone", "")),
             ("Locale", self.answers.get("locale", "")),
             ("Screen width (px)", self.answers.get("screen_pixels_width", "")),
@@ -3670,6 +3972,13 @@ class ProvisioningWizard(tk.Tk):
             ("Username", self.answers.get("username", "")),
             ("Password", self.answers.get("password", "")),
         ]
+        if self._defaults_group_cloud_data_store_enabled() and "cloud_trial_ingest" in self.answers:
+            rows.append(
+                (
+                    "Cloud trial data",
+                    "Yes" if self.answers.get("cloud_trial_ingest") else "No",
+                )
+            )
         for label, value in rows:
             row = tk.Frame(review_frame, bg=ENTRY_BG)
             row.pack(fill="x", pady=2)
@@ -3750,6 +4059,16 @@ class ProvisioningWizard(tk.Tk):
             summary += f"; missing: {', '.join(missing)}"
         return summary
 
+    def _boot_target_review_summary(self):
+        dev = (self.answers.get("boot_target_device") or "").strip()
+        if not dev:
+            return "(not selected)"
+        candidates, _root_dev = list_boot_target_candidates()
+        for row in candidates:
+            if row.get("dev") == dev:
+                return format_boot_target_line(row)
+        return dev
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
@@ -3764,6 +4083,7 @@ class ProvisioningWizard(tk.Tk):
             self.answers["defaults_group"] = value
             self.answers.pop("defaults_device_type", None)
             self.answers.pop("defaults_section", None)
+            self.answers.pop("cloud_trial_ingest", None)
 
         elif step_name == "_step_defaults_device_type":
             group = self.answers.get("defaults_group", "")
@@ -3780,6 +4100,7 @@ class ProvisioningWizard(tk.Tk):
             self.answers["defaults_device_type"] = device_type
             self.answers["defaults_section"] = section
             self._apply_defaults_section(section)
+            self.answers.pop("cloud_trial_ingest", None)
 
         elif step_name == "_step_wifi_country":
             value = self._wifi_country_var.get().strip().upper() or DEFAULT_WIFI_COUNTRY
@@ -3787,6 +4108,36 @@ class ProvisioningWizard(tk.Tk):
                 self._show_styled_error_modal("Invalid", "Wi-Fi country must be 2 letters like US.")
                 return False
             self.answers["wifi_country"] = value
+
+        elif step_name == "_step_accessory_checks":
+            return True
+
+        elif step_name == "_step_boot_target_device":
+            candidates, _root_dev = list_boot_target_candidates()
+            self._boot_target_rows = candidates
+            if not candidates:
+                self._show_styled_error_modal(
+                    "No boot target",
+                    "No boot target drives were found. Connect NVMe, microSD, or USB storage and retry.",
+                )
+                return False
+            if len(candidates) == 1:
+                self.answers["boot_target_device"] = candidates[0]["dev"]
+                return True
+            selection = (
+                self._boot_target_listbox.curselection()
+                if getattr(self, "_boot_target_listbox", None) is not None
+                else ()
+            )
+            if not selection:
+                self._show_styled_error_modal("Required", "Please select the boot target drive.")
+                return False
+            idx = selection[0]
+            if idx < 0 or idx >= len(candidates):
+                self._show_styled_error_modal("Invalid", "Please select a valid boot target drive.")
+                return False
+            self.answers["boot_target_device"] = candidates[idx]["dev"]
+            return True
 
         elif step_name == "_step_timezone":
             value = self._timezone_var.get().strip() or DEFAULT_TIMEZONE
@@ -3984,9 +4335,10 @@ class ProvisioningWizard(tk.Tk):
                 self.answers["wifi_test_message"] = result["message"]
 
                 if result["ok"]:
-                    # Do not gate on NM secret readback. Association already used the passphrase from
-                    # hb_secret_agent; nmcli may expose WPA2 PMK hex, WPA3 blobs, masking, etc., so a
-                    # string compare falsely fails and wedges this step despite a successful connect.
+                    value = self._apply_wifi_test_password_sync(
+                        value, result.get("actual_password") or ""
+                    )
+                    test_signature = (ssid, value, hidden_now)
 
                     redo_full_wifi = False
                     while True:
@@ -4092,6 +4444,9 @@ class ProvisioningWizard(tk.Tk):
         elif step_name == "_step_login_credentials_reminder":
             return True
 
+        elif step_name == "_step_cloud_trial_ingest":
+            return True
+
         elif step_name == "_step_monitor_width":
             return self._validate_float_step("monitor_width_cm", self._monitor_width_var)
 
@@ -4134,7 +4489,7 @@ def parse_args():
     parser.add_argument(
         "--no-self-update",
         action="store_true",
-        help="Do not git fetch/merge to update this repo before running (also HB_PROVISION_NO_SELF_UPDATE=1).",
+        help="Do not git fetch/merge for this repo or provision_nvme.sh (also HB_PROVISION_NO_SELF_UPDATE=1).",
     )
     return parser.parse_args()
 
