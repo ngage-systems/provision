@@ -92,6 +92,10 @@ KEYBOARD_CTRL_SMALL_W = _keyboard_scale(7)
 MODAL_FOCUS_RETRY_MS = 100
 
 DEFAULT_WIFI_COUNTRY = "US"
+WIFI_GUEST_NETWORK_HINT = (
+    "Avoid guest or visitor networks — they often require a browser sign-in portal "
+    "that this setup cannot complete."
+)
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_LOCALE = "en_us"
 DEFAULT_MONITOR_WIDTH_CM = "21.7"
@@ -3525,6 +3529,7 @@ class ProvisioningWizard(tk.Tk):
                 "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
                 "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list."
             )
+        self._add_label(WIFI_GUEST_NETWORK_HINT, fg=MUTED)
         self._refresh_wifi_scan(force=False)
 
         scan_row = tk.Frame(self.content, bg=BG)
@@ -3625,6 +3630,7 @@ class ProvisioningWizard(tk.Tk):
     def _step_wifi_ssid_manual(self):
         self._add_title("Enter Wi-Fi network name")
         self._add_label("Type the SSID exactly. Use the checkbox if the network does not broadcast its name.")
+        self._add_label(WIFI_GUEST_NETWORK_HINT, fg=MUTED)
         self._wifi_ssid_var, entry = self._add_entry(self.answers.get("wifi_ssid", ""))
         self._wifi_hidden_var = tk.BooleanVar(value=bool(self.answers.get("wifi_hidden")))
         hid_row = tk.Frame(self.content, bg=BG)
