@@ -12,6 +12,7 @@ DEFAULTS_GROUP="${DEVICE_DEFAULTS_GROUP:-}"
 DEFAULTS_FILE=""
 HOSTNAME_OVERRIDE=""
 NO_RESTART=0
+REGISTER=0
 OTHER_ROOT_MOUNTED=0
 
 die() {
@@ -67,6 +68,7 @@ Options:
   --defaults-group GROUP   Defaults group from device_defaults.ini (or DEVICE_DEFAULTS_GROUP)
   --defaults-file PATH     Path to device_defaults.ini (default: beside this script)
   --hostname NAME          Hostname for cloud registry user (default: /etc/hostname)
+  --register               Register writer with cloud registry (also when secret is copied from other drive)
   --no-restart             Skip systemctl restart dserv
   -h, --help               Show this help
 
@@ -102,6 +104,10 @@ parse_args() {
         ;;
       --hostname=*)
         HOSTNAME_OVERRIDE="${1#--hostname=}"
+        shift
+        ;;
+      --register)
+        REGISTER=1
         shift
         ;;
       --no-restart)
@@ -210,6 +216,9 @@ main() {
         log "Found trial ingest secret on other drive; copying to live system."
         write_trial_ingest_secret "$secret" ""
         secret_source="other_drive"
+        if [[ "$REGISTER" -eq 1 ]]; then
+          register=1
+        fi
       fi
     else
       log "WARNING: Could not mount root partition on ${other_dev}; skipping other-drive secret check."
@@ -270,7 +279,7 @@ main() {
       print_trial_ingest_secret_banner "$secret" "$HB_TRIAL_INGEST_SECRET"
     fi
   elif [[ "$secret_source" == "other_drive" ]]; then
-    log "Skipping cloud registry registration (secret copied from other drive)."
+    log "Skipping cloud registry registration (secret copied from other drive; use --register to register)."
   fi
 
   if [[ "$NO_RESTART" -eq 0 ]]; then
