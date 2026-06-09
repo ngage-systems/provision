@@ -18,6 +18,29 @@ if ! declare -F need_cmd >/dev/null 2>&1; then
   }
 fi
 
+trial_ingest_ini_list_sections() {
+  local file="$1"
+  [[ -n "$file" ]] || die "trial_ingest_ini_list_sections: defaults file path is empty"
+  [[ -r "$file" ]] || die "trial_ingest_ini_list_sections: cannot read defaults file: $file"
+  awk '
+    /^[[:space:]]*\[/ {
+      line=$0
+      sub(/^[[:space:]]*\[/, "", line)
+      sub(/\][[:space:]]*$/, "", line)
+      print line
+    }' "$file"
+}
+
+trial_ingest_ini_list_groups() {
+  local file="$1"
+  trial_ingest_ini_list_sections "$file" | awk -F. '
+    NF>=3 {
+      group=$1
+      for (i=2; i<NF; i++) group=group "." $i
+      print group
+    }' | sort -u
+}
+
 trial_ingest_ini_get() {
   local file="$1"
   local section="$2"
@@ -53,7 +76,7 @@ mesh_workgroup_for_defaults_group() {
   local wg
   wg="$(trial_ingest_ini_get "$file" "$group" "mesh_workgroup")"
   if [[ -n "$wg" ]]; then
-    echo "$wg"
+    echo "${wg//./-}"
     return 0
   fi
   echo "${group//./-}"

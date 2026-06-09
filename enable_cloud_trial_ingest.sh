@@ -122,18 +122,7 @@ parse_args() {
 prompt_defaults_group() {
   local defaults_file="$1"
   local groups group_choice
-  groups="$(awk '
-    /^[[:space:]]*\[[^]]+\][[:space:]]*$/ {
-      line=$0
-      sub(/^[[:space:]]*\[/, "", line)
-      sub(/\][[:space:]]*$/, "", line)
-      if (line ~ /\./) {
-        n=split(line, p, ".")
-        grp=p[1]
-        for (i=2; i<n; i++) grp=grp "." p[i]
-        print grp
-      }
-    }' "$defaults_file" | sort -u)"
+  groups="$(trial_ingest_ini_list_groups "$defaults_file")"
 
   [[ -n "$groups" ]] || die "No defaults groups found in ${defaults_file}."
 
@@ -217,7 +206,7 @@ main() {
     log "Other boot disk detected: ${other_dev}"
     if other_mnt="$(trial_ingest_mount_other_root "$other_dev" "$HB_OTHER_ROOT_MNT" ro)"; then
       OTHER_ROOT_MOUNTED=1
-      if secret="$(read_trial_ingest_secret "$other_mnt" 2>/dev/null || true)"; then
+      if secret="$(read_trial_ingest_secret "$other_mnt" 2>/dev/null)"; then
         log "Found trial ingest secret on other drive; copying to live system."
         write_trial_ingest_secret "$secret" ""
         secret_source="other_drive"
