@@ -1534,6 +1534,8 @@ class ProvisioningWizard(tk.Tk):
         self._wifi_ssid_manual_flow = False
         self._display_profile_auto_confirmed = False
         self._wifi_country_from_ini = False
+        self._timezone_from_ini = False
+        self._locale_from_ini = False
         self._provisioning_active = False
         self._defaults_preset_group = ""
         self._defaults_preset_device_type = ""
@@ -2326,6 +2328,12 @@ class ProvisioningWizard(tk.Tk):
             if name == "_step_wifi_country" and self._should_skip_wifi_country_step():
                 next_index += 1
                 continue
+            if name == "_step_timezone" and self._should_skip_timezone_step():
+                next_index += 1
+                continue
+            if name == "_step_locale" and self._should_skip_locale_step():
+                next_index += 1
+                continue
             break
         return next_index
 
@@ -2352,6 +2360,12 @@ class ProvisioningWizard(tk.Tk):
                 previous_index -= 1
                 continue
             if name == "_step_wifi_country" and self._should_skip_wifi_country_step():
+                previous_index -= 1
+                continue
+            if name == "_step_timezone" and self._should_skip_timezone_step():
+                previous_index -= 1
+                continue
+            if name == "_step_locale" and self._should_skip_locale_step():
                 previous_index -= 1
                 continue
             break
@@ -3509,8 +3523,12 @@ class ProvisioningWizard(tk.Tk):
         self.answers.pop("defaults_section", None)
         self.answers.pop("cloud_trial_ingest", None)
         self.answers["wifi_country"] = DEFAULT_WIFI_COUNTRY
+        self.answers["timezone"] = DEFAULT_TIMEZONE
+        self.answers["locale"] = DEFAULT_LOCALE
         self._display_profile_auto_confirmed = False
         self._wifi_country_from_ini = False
+        self._timezone_from_ini = False
+        self._locale_from_ini = False
 
     def _ini_get_with_group_fallback(self, key, section=None, group=None):
         section = (section or self.answers.get("defaults_section") or "").strip()
@@ -3530,6 +3548,17 @@ class ProvisioningWizard(tk.Tk):
                 return value
         return ""
 
+    def _normalize_locale_answer(self, value):
+        value = (value or "").strip().lower()
+        if value.endswith(".utf-8"):
+            value = value[:-6]
+        if not re.fullmatch(r"[a-z]{2}_[a-z]{2}", value):
+            return None
+        base = f"{value[:2]}_{value[3:].upper()}"
+        if not Path("/usr/share/i18n/locales", base).is_file():
+            return None
+        return f"{base}.UTF-8"
+
     def _apply_wifi_country_from_ini(self):
         value = self._ini_get_with_group_fallback("wifi_country").upper()
         if re.fullmatch(r"[A-Z]{2}", value):
@@ -3537,6 +3566,27 @@ class ProvisioningWizard(tk.Tk):
             self._wifi_country_from_ini = True
         else:
             self._wifi_country_from_ini = False
+
+    def _apply_timezone_from_ini(self):
+        value = self._ini_get_with_group_fallback("timezone")
+        if value and Path("/usr/share/zoneinfo", value).is_file():
+            self.answers["timezone"] = value
+            self._timezone_from_ini = True
+        else:
+            self._timezone_from_ini = False
+
+    def _apply_locale_from_ini(self):
+        normalized = self._normalize_locale_answer(self._ini_get_with_group_fallback("locale"))
+        if normalized:
+            self.answers["locale"] = normalized
+            self._locale_from_ini = True
+        else:
+            self._locale_from_ini = False
+
+    def _apply_regional_defaults_from_ini(self):
+        self._apply_wifi_country_from_ini()
+        self._apply_timezone_from_ini()
+        self._apply_locale_from_ini()
 
     def _defaults_profile_locked_from_preset(self):
         preset = (self._defaults_preset_group or "").strip()
@@ -3581,10 +3631,16 @@ class ProvisioningWizard(tk.Tk):
     def _sync_defaults_profile_auto_apply(self):
         self._auto_apply_defaults_group_from_preset()
         self._auto_apply_single_device_type_if_needed()
-        self._apply_wifi_country_from_ini()
+        self._apply_regional_defaults_from_ini()
 
     def _should_skip_wifi_country_step(self):
         return self._wifi_country_from_ini
+
+    def _should_skip_timezone_step(self):
+        return self._timezone_from_ini
+
+    def _should_skip_locale_step(self):
+        return self._locale_from_ini
 
     def _first_non_skipped_step_index(self, start_index=0):
         if not self.steps:
@@ -3596,6 +3652,12 @@ class ProvisioningWizard(tk.Tk):
                 index += 1
                 continue
             if name == "_step_wifi_country" and self._should_skip_wifi_country_step():
+                index += 1
+                continue
+            if name == "_step_timezone" and self._should_skip_timezone_step():
+                index += 1
+                continue
+            if name == "_step_locale" and self._should_skip_locale_step():
                 index += 1
                 continue
             break
@@ -3651,8 +3713,6 @@ class ProvisioningWizard(tk.Tk):
 
         key_map = {
             "username": "username",
-            "timezone": "timezone",
-            "locale": "locale",
             "screen_pixels_width": "screen_pixels_width",
             "screen_pixels_height": "screen_pixels_height",
             "screen_refresh_rate": "screen_refresh_rate",
@@ -3665,7 +3725,7 @@ class ProvisioningWizard(tk.Tk):
             value = self.config.get(section, ini_key, fallback="").strip()
             if value:
                 self.answers[answer_key] = value
-        self._apply_wifi_country_from_ini()
+        self._apply_regional_defaults_from_ini()
         self._try_auto_confirm_display_profile()
 
     def _should_skip_display_profile_step(self, step_name):
@@ -4454,7 +4514,7 @@ class ProvisioningWizard(tk.Tk):
                 self._clear_defaults_profile_selection()
             self.answers["defaults_group"] = full_group
             self._auto_apply_single_device_type_if_needed()
-            self._apply_wifi_country_from_ini()
+            self._apply_regional_defaults_from_ini()
 
         elif step_name == "_step_defaults_device_type":
             if self._should_skip_defaults_device_type_step():
@@ -4515,6 +4575,8 @@ class ProvisioningWizard(tk.Tk):
             return True
 
         elif step_name == "_step_timezone":
+            if self._should_skip_timezone_step():
+                return True
             value = self._timezone_var.get().strip() or DEFAULT_TIMEZONE
             if not Path("/usr/share/zoneinfo", value).is_file():
                 self._show_styled_error_modal(
@@ -4525,15 +4587,17 @@ class ProvisioningWizard(tk.Tk):
             self.answers["timezone"] = value
 
         elif step_name == "_step_locale":
+            if self._should_skip_locale_step():
+                return True
             value = self._locale_var.get().strip().lower() or DEFAULT_LOCALE
-            if not re.fullmatch(r"[a-z]{2}_[a-z]{2}", value):
-                self._show_styled_error_modal("Invalid", "Locale must look like en_us, en_gb, fr_fr, or de_de.")
+            normalized = self._normalize_locale_answer(value)
+            if not normalized:
+                self._show_styled_error_modal(
+                    "Invalid",
+                    "Locale must look like en_us, en_gb, fr_fr, or de_de.",
+                )
                 return False
-            base = f"{value[:2]}_{value[3:].upper()}"
-            if not Path("/usr/share/i18n/locales", base).is_file():
-                self._show_styled_error_modal("Invalid", f"Locale not found on this system: {value}")
-                return False
-            self.answers["locale"] = f"{base}.UTF-8"
+            self.answers["locale"] = normalized
 
         elif step_name == "_step_screen_width":
             value = self._screen_width_var.get().strip()

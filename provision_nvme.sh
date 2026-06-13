@@ -396,8 +396,14 @@ load_defaults() {
   val="$(ini_get "$DEFAULTS_FILE" "$DEFAULTS_SECTION" "username")"
   [[ -n "$val" ]] && DEFAULT_USERNAME="$val"
   val="$(ini_get "$DEFAULTS_FILE" "$DEFAULTS_SECTION" "timezone")"
+  if [[ -z "$val" && -n "$meta" ]] && ini_section_exists "$DEFAULTS_FILE" "$meta"; then
+    val="$(ini_get "$DEFAULTS_FILE" "$meta" "timezone")"
+  fi
   [[ -n "$val" ]] && DEFAULT_TIMEZONE="$val"
   val="$(ini_get "$DEFAULTS_FILE" "$DEFAULTS_SECTION" "locale")"
+  if [[ -z "$val" && -n "$meta" ]] && ini_section_exists "$DEFAULTS_FILE" "$meta"; then
+    val="$(ini_get "$DEFAULTS_FILE" "$meta" "locale")"
+  fi
   [[ -n "$val" ]] && DEFAULT_LOCALE="$val"
   val="$(ini_get "$DEFAULTS_FILE" "$DEFAULTS_SECTION" "wifi_country")"
   if [[ -z "$val" && -n "$meta" ]] && ini_section_exists "$DEFAULTS_FILE" "$meta"; then
