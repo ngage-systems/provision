@@ -1502,6 +1502,7 @@ class ProvisioningWizard(tk.Tk):
         self._last_wifi_test_signature = None
         self._wifi_ssid_manual_flow = False
         self._display_profile_auto_confirmed = False
+        self._provisioning_active = False
 
         self.answers = {
             "wifi_country": DEFAULT_WIFI_COUNTRY,
@@ -2495,9 +2496,26 @@ class ProvisioningWizard(tk.Tk):
         self._sync_wifi_flat_from_primary_network()
         return False
 
+    def _set_provisioning_started_ui(self):
+        self._provisioning_active = True
+        self.btn_next.config(text="Starting...", state="disabled")
+        self.btn_back.config(state="disabled")
+        self.btn_recheck_accessories.config(state="disabled")
+        self.update_idletasks()
+
+    def _reset_provisioning_ui(self):
+        self._provisioning_active = False
+        next_text = "Finish" if self.step_index == len(self.steps) - 1 else "Next >"
+        self.btn_next.config(text=next_text, state="normal")
+        self.btn_back.config(state="normal" if self.step_index > 0 else "disabled")
+        self.btn_recheck_accessories.config(state="normal")
+
     def _on_finish(self):
+        if self._provisioning_active:
+            return
         if not self._confirm_destructive_provision():
             return
+        self._set_provisioning_started_ui()
 
         self._normalize_wifi_networks_for_export()
 
@@ -2509,6 +2527,7 @@ class ProvisioningWizard(tk.Tk):
             )
             os.chmod(output_path, 0o600)
         except OSError as exc:
+            self._reset_provisioning_ui()
             self._show_styled_error_modal(
                 "Save failed",
                 f"Could not write {self.output_path}:\n{exc}",
@@ -2519,6 +2538,7 @@ class ProvisioningWizard(tk.Tk):
         reg_host, _reg_port = self._registry_probe_target()
         self._warn_critical_dns_if_needed(registry_hostname=reg_host)
         if not self._launch_backend():
+            self._reset_provisioning_ui()
             return
         # Avoid withdraw(): provision log is Toplevel(self); unmapping the root blanks it on many WMs.
 
@@ -3861,7 +3881,9 @@ class ProvisioningWizard(tk.Tk):
     def _step_hostname(self):
         self._add_title("Name this device")
         self._add_label(
-            "This name identifies the device on the network, in control tools, and when connecting with SSH."
+            "This name identifies the device on the network, in control tools, and when connecting with SSH. "
+            "For convenience, use the name that matches this device's handle — the suggested value below "
+            "is usually correct."
         )
         hostname = self.answers.get("hostname", "")
         if hostname:
@@ -3871,7 +3893,9 @@ class ProvisioningWizard(tk.Tk):
 
     def _step_username(self):
         self._add_title("Create login user")
-        self._add_label("Enter the username for signing in and SSH access.")
+        self._add_label(
+            "Enter the username for SSH access. This is mainly used for troubleshooting should the need arise."
+        )
         self._show_default_hint("username")
         self._username_var, entry = self._add_entry(self.answers.get("username", ""))
         entry.focus_set()

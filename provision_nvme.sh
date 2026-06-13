@@ -29,6 +29,7 @@ HB_PROVISION_NO_SELF_UPDATE="${HB_PROVISION_NO_SELF_UPDATE:-0}"
 HB_LOG_FILE=""
 ANSWERS_FILE="${HB_PROVISION_ANSWERS:-/tmp/hb_provision_answers.json}"
 HB_REBOOT_REQUEST_FILE="${HB_PROVISION_REBOOT_REQUEST_FILE:-/tmp/hb_provision_reboot_requested}"
+HB_PROVISION_LOCK_FILE="${HB_PROVISION_LOCK_FILE:-/tmp/hb_provision_nvme.lock}"
 HB_PROVISION_COMPLETE_MARKER="Provisioning complete. Waiting for GUI reboot request."
 
 # Persistent swap on host rootfs (eMMC when booting from eMMC). Adds /etc/fstab entry. HB_EMMC_SWAP_MB=0 disables.
@@ -810,6 +811,11 @@ require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     die "Run as root (e.g. sudo $0)"
   fi
+}
+
+acquire_provision_lock() {
+  exec 9>"${HB_PROVISION_LOCK_FILE}"
+  flock -n 9 || die "Another NVMe provisioning run is already in progress."
 }
 
 read_os_codename() {
@@ -2841,6 +2847,7 @@ main() {
   setup_logging
   parse_args "$@"
   require_root
+  acquire_provision_lock
   rm -f "$HB_REBOOT_REQUEST_FILE"
   load_answers_json "$ANSWERS_FILE"
   apply_answer_defaults_env
