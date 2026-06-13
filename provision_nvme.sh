@@ -12,7 +12,7 @@ set -euo pipefail
 # - Flash Raspberry Pi OS Lite arm64 to NVMe and expand the root filesystem
 # - Configure headless settings: SSH, user, hostname, Wi-Fi, timezone, locale
 # - Configure display mode/rotation and monitor geometry
-# - Install dserv stack + ESS repo in NVMe rootfs
+# - Install dserv stack + ESS repo + browser editor (code-server) in NVMe rootfs
 # - Copy /etc/dserv/trial_ingest_secret from the fallback host rootfs when present (written by provision_emmc_for_nvme_fallback.sh)
 # - Enable services, kiosk settings, and seatd (with stim2 startup delay)
 # - Save full log to /var/log/provision/provision_nvme_YYYYMMDD_HHMMSS.log on NVMe rootfs
@@ -266,12 +266,23 @@ source_trial_ingest_lib() {
   local script_path script_dir lib
   script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
-  lib="${script_dir}/trial_ingest_lib.sh"
+  lib="${script_dir}/lib/trial_ingest_lib.sh"
   [[ -r "$lib" ]] || die "Missing shared library: $lib"
-  # shellcheck source=trial_ingest_lib.sh
+  # shellcheck source=lib/trial_ingest_lib.sh
   source "$lib"
 }
 source_trial_ingest_lib
+
+source_browser_editor_lib() {
+  local script_path script_dir lib
+  script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+  script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
+  lib="${script_dir}/lib/browser_editor_lib.sh"
+  [[ -r "$lib" ]] || die "Missing shared library: $lib"
+  # shellcheck source=lib/browser_editor_lib.sh
+  source "$lib"
+}
+source_browser_editor_lib
 
 select_defaults_section() {
   local file="$1"
@@ -2820,6 +2831,21 @@ set env(ESS_EXPORT_PATH) ${ess_converted_dir}
 EOF
 }
 
+install_browser_editor_root() {
+  local root_mnt="$1"
+  local username="$2"
+  local password="$3"
+  local hostname="$4"
+
+  log "Installing browser editor (code-server) in NVMe rootfs..."
+  mount_chroot_env "$root_mnt"
+  trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
+  install_browser_editor "$root_mnt" "$username" "$password" "$hostname"
+  unmount_chroot_env "$root_mnt"
+  trap - RETURN
+  log "Browser editor (code-server) configured in NVMe rootfs."
+}
+
 configure_raspi_config_root() {
   local root_mnt="$1"
   if [[ ! -x "${root_mnt}/usr/bin/raspi-config" ]]; then
@@ -2963,6 +2989,7 @@ main() {
   sync_trial_ingest_secret_to_nvme_root "$HB_ROOT_MNT"
   configure_trial_ingest_pre_remoteservers_root "$HB_ROOT_MNT"
   install_ess_repo_root "$HB_ROOT_MNT" "$username"
+  install_browser_editor_root "$HB_ROOT_MNT" "$username" "$password" "$hostname"
   write_monitor_tcl_root "$HB_ROOT_MNT"
 
   enable_systemd_service_root "$HB_ROOT_MNT" "/usr/local/stim2/systemd/stim2.service"

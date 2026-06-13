@@ -164,9 +164,9 @@ source_lib() {
   local script_path script_dir lib
   script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
   script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
-  lib="${script_dir}/trial_ingest_lib.sh"
+  lib="${script_dir}/lib/trial_ingest_lib.sh"
   [[ -r "$lib" ]] || die "Missing shared library: $lib"
-  # shellcheck source=trial_ingest_lib.sh
+  # shellcheck source=lib/trial_ingest_lib.sh
   source "$lib"
 }
 
