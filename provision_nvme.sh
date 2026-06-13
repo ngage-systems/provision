@@ -12,7 +12,7 @@ set -euo pipefail
 # - Flash Raspberry Pi OS Lite arm64 to NVMe and expand the root filesystem
 # - Configure headless settings: SSH, user, hostname, Wi-Fi, timezone, locale
 # - Configure display mode/rotation and monitor geometry
-# - Install dserv stack + ESS repo + browser editor (code-server) in NVMe rootfs
+# - Install dserv stack + ESS repo + lazy browser editor (Caddy + code-server on demand) in NVMe rootfs
 # - Copy /etc/dserv/trial_ingest_secret from the fallback host rootfs when present (written by provision_emmc_for_nvme_fallback.sh)
 # - Enable services, kiosk settings, and seatd (with stim2 startup delay)
 # - Save full log to /var/log/provision/provision_nvme_YYYYMMDD_HHMMSS.log on NVMe rootfs
@@ -2837,13 +2837,13 @@ install_browser_editor_root() {
   local password="$3"
   local hostname="$4"
 
-  log "Installing browser editor (code-server) in NVMe rootfs..."
+  log "Installing lazy browser editor (Caddy + code-server on demand) in NVMe rootfs..."
   mount_chroot_env "$root_mnt"
   trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
   install_browser_editor "$root_mnt" "$username" "$password" "$hostname"
   unmount_chroot_env "$root_mnt"
   trap - RETURN
-  log "Browser editor (code-server) configured in NVMe rootfs."
+  log "Lazy browser editor configured in NVMe rootfs (Caddy on :8080; code-server starts on request)."
 }
 
 configure_raspi_config_root() {

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Shared browser editor (code-server) install helpers. Source from provision scripts.
 
-: "${BROWSER_EDITOR_CODE_BIND:=0.0.0.0:8080}"
+: "${BROWSER_EDITOR_PUBLIC_PORT:=8080}"
+: "${BROWSER_EDITOR_UPSTREAM_BIND:=127.0.0.1:8081}"
+: "${BROWSER_EDITOR_WAKE_BIND:=127.0.0.1:9082}"
+: "${BROWSER_EDITOR_IDLE_SECONDS:=3600}"
+: "${BROWSER_EDITOR_TLS_DIR:=/etc/hb-browser-editor/tls}"
 : "${BROWSER_EDITOR_WORKSPACE_SUBPATH:=systems}"
 : "${BROWSER_EDITOR_DOCS_REPO:=https://github.com/ngage-systems/trainer_docs/archive/refs/heads/main.tar.gz}"
 : "${BROWSER_EDITOR_DOCS_STRIP:=trainer_docs-main/docs/agentic-coding}"
@@ -17,6 +21,16 @@ fi
 
 browser_editor_yaml_single_quote() {
   printf "'%s'" "${1//\'/\'\'}"
+}
+
+browser_editor_lib_dir() {
+  local lib_path
+  lib_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+  dirname "$lib_path"
+}
+
+browser_editor_asset_dir() {
+  echo "$(browser_editor_lib_dir)/hb-browser-editor"
 }
 
 browser_editor_resolve_user() {
@@ -51,6 +65,25 @@ browser_editor_path_prefix() {
   fi
 }
 
+browser_editor_systemctl() {
+  local root_mnt="$1"
+  shift
+  if [[ -n "$root_mnt" ]]; then
+    SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" "$@"
+  else
+    systemctl "$@"
+  fi
+}
+
+browser_editor_target_has_caddy_group() {
+  local root_mnt="$1"
+  if [[ -n "$root_mnt" ]]; then
+    grep -q '^caddy:' "${root_mnt}/etc/group" 2>/dev/null
+  else
+    getent group caddy >/dev/null 2>&1
+  fi
+}
+
 browser_editor_install_code_server() {
   local root_mnt="$1"
   local code_server_bin
@@ -73,6 +106,32 @@ browser_editor_install_code_server() {
   fi
 
   [[ -x "$code_server_bin" ]] || die "code-server binary not found after install: $code_server_bin"
+}
+
+browser_editor_install_caddy() {
+  local root_mnt="$1"
+
+  if [[ -n "$root_mnt" ]]; then
+    if [[ -x "${root_mnt}/usr/bin/caddy" ]]; then
+      log "caddy already installed in target rootfs."
+      return 0
+    fi
+    local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
+    log "Installing caddy in target rootfs..."
+    chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/apt-get update --error-on=any \
+      || die "Failed to apt-get update before caddy install."
+    chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/apt-get install -y --no-install-recommends caddy \
+      || die "Failed to install caddy in target rootfs."
+  else
+    if command -v caddy >/dev/null 2>&1; then
+      log "caddy already installed."
+      return 0
+    fi
+    log "Installing caddy..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update --error-on=any || die "Failed to apt-get update before caddy install."
+    apt-get install -y --no-install-recommends caddy || die "Failed to install caddy."
+  fi
 }
 
 browser_editor_download_docs() {
@@ -142,19 +201,18 @@ browser_editor_cert_san() {
 }
 
 browser_editor_generate_tls_cert() {
-  local cert_dir="$1"
+  local root_mnt="$1"
   local cert_cn="$2"
-  local target_uid="$3"
-  local target_gid="$4"
-  local san key_file crt_file
+  local cert_dir_mnt san key_file crt_file
 
   [[ -n "$cert_cn" ]] || die "TLS certificate CN is required."
+  cert_dir_mnt="$(browser_editor_path_prefix "$root_mnt" "$BROWSER_EDITOR_TLS_DIR")"
   san="$(browser_editor_cert_san "$cert_cn")"
-  key_file="${cert_dir}/self.key"
-  crt_file="${cert_dir}/self.crt"
+  key_file="${cert_dir_mnt}/self.key"
+  crt_file="${cert_dir_mnt}/self.crt"
 
   log "Generating self-signed TLS certificate (${BROWSER_EDITOR_CERT_DAYS}-day, CN=${cert_cn})..."
-  install -d -o "$target_uid" -g "$target_gid" "$cert_dir"
+  install -d -m 0755 "$cert_dir_mnt"
   openssl req -x509 -nodes \
     -newkey rsa:2048 \
     -days "$BROWSER_EDITOR_CERT_DAYS" \
@@ -164,8 +222,15 @@ browser_editor_generate_tls_cert() {
     -addext "subjectAltName=${san}" \
     2>/dev/null \
     || die "Failed to generate TLS certificate."
-  chown -R "${target_uid}:${target_gid}" "$cert_dir"
-  chmod 600 "$key_file"
+
+  if browser_editor_target_has_caddy_group "$root_mnt"; then
+    chown root:caddy "$key_file" "$crt_file"
+    chmod 640 "$key_file"
+    chmod 644 "$crt_file"
+  else
+    chmod 600 "$key_file"
+    chmod 644 "$crt_file"
+  fi
 }
 
 browser_editor_write_config() {
@@ -192,18 +257,16 @@ EOF
   cat >"$config_file_mnt" <<EOF
 # code-server configuration
 # Managed by browser_editor_lib.sh — edit carefully
-bind-addr: ${BROWSER_EDITOR_CODE_BIND}
+bind-addr: ${BROWSER_EDITOR_UPSTREAM_BIND}
 auth: password
 password: $(browser_editor_yaml_single_quote "$password")
 i18n: ${conf_dir}/login-i18n.json
-cert: ${conf_dir}/tls/self.crt
-cert-key: ${conf_dir}/tls/self.key
 EOF
   chown "${target_uid}:${target_gid}" "$config_file_mnt"
   chmod 600 "$config_file_mnt"
 }
 
-browser_editor_configure_systemd() {
+browser_editor_configure_code_server_dropin() {
   local root_mnt="$1"
   local target_user="$2"
   local workspace="$3"
@@ -213,7 +276,7 @@ browser_editor_configure_systemd() {
   dropin_dir="$(browser_editor_path_prefix "$root_mnt" "/etc/systemd/system/${service_name}.d")"
   override_file="${dropin_dir}/override.conf"
 
-  log "Configuring systemd service to open ${workspace}..."
+  log "Configuring code-server drop-in (workspace ${workspace}; not started at boot)..."
   install -d "$dropin_dir"
   cat >"$override_file" <<EOF
 [Service]
@@ -221,22 +284,96 @@ ExecStart=
 ExecStart=/usr/bin/code-server ${workspace}
 EOF
 
-  if [[ -n "$root_mnt" ]]; then
-    SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" enable "$service_name" \
-      || log "WARNING: Failed to enable ${service_name} in target rootfs."
-    return 0
-  fi
+  browser_editor_systemctl "$root_mnt" disable "$service_name" \
+    || log "WARNING: Failed to disable ${service_name} at boot."
+  browser_editor_systemctl "$root_mnt" stop "$service_name" 2>/dev/null || true
+}
 
-  systemctl daemon-reload
-  systemctl enable "$service_name"
-  systemctl restart "$service_name"
-  log "code-server service enabled and restarted."
+browser_editor_install_assets() {
+  local root_mnt="$1"
+  local asset_dir dest_dir
+
+  asset_dir="$(browser_editor_asset_dir)"
+  [[ -d "$asset_dir" ]] || die "Missing browser editor assets: $asset_dir"
+
+  dest_dir="$(browser_editor_path_prefix "$root_mnt" "/usr/local/lib/hb-browser-editor")"
+  install -d -m 0755 "$dest_dir"
+  install -m 0755 "${asset_dir}/wake-server.py" "${dest_dir}/wake-server.py"
+  install -m 0755 "${asset_dir}/idle-stop.sh" "${dest_dir}/idle-stop.sh"
+}
+
+browser_editor_write_unit_from_template() {
+  local template="$1"
+  local dest_mnt="$2"
+  local target_user="$3"
+
+  sed "s/__BROWSER_EDITOR_USER__/${target_user}/g" "$template" >"$dest_mnt"
+}
+
+browser_editor_install_proxy_stack() {
+  local root_mnt="$1"
+  local target_user="$2"
+  local asset_dir etc_dir caddyfile_mnt caddy_dropin wake_unit idle_unit idle_timer
+  local wake_unit_mnt idle_unit_mnt idle_timer_mnt caddy_dropin_mnt
+
+  asset_dir="$(browser_editor_asset_dir)"
+  etc_dir="$(browser_editor_path_prefix "$root_mnt" "/etc/hb-browser-editor")"
+  caddyfile_mnt="${etc_dir}/Caddyfile"
+  caddy_dropin_mnt="$(browser_editor_path_prefix "$root_mnt" "/etc/systemd/system/caddy.service.d/override.conf")"
+  wake_unit_mnt="$(browser_editor_path_prefix "$root_mnt" "/etc/systemd/system/hb-browser-editor-wake.service")"
+  idle_unit_mnt="$(browser_editor_path_prefix "$root_mnt" "/etc/systemd/system/hb-browser-editor-idle.service")"
+  idle_timer_mnt="$(browser_editor_path_prefix "$root_mnt" "/etc/systemd/system/hb-browser-editor-idle.timer")"
+
+  log "Installing lazy browser editor proxy stack (Caddy + wake + idle timer)..."
+  browser_editor_install_assets "$root_mnt"
+
+  install -d -m 0755 "$etc_dir"
+  sed \
+    -e "s|:__PUBLIC_PORT__|:${BROWSER_EDITOR_PUBLIC_PORT}|g" \
+    -e "s|__TLS_DIR__|${BROWSER_EDITOR_TLS_DIR}|g" \
+    -e "s|__WAKE_ADDR__|${BROWSER_EDITOR_WAKE_BIND}|g" \
+    -e "s|__UPSTREAM__|${BROWSER_EDITOR_UPSTREAM_BIND}|g" \
+    "${asset_dir}/Caddyfile.template" >"$caddyfile_mnt"
+
+  install -d "$(dirname "$caddy_dropin_mnt")"
+  cat >"$caddy_dropin_mnt" <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/bin/caddy run --environ --config /etc/hb-browser-editor/Caddyfile
+EOF
+
+  browser_editor_write_unit_from_template \
+    "${asset_dir}/hb-browser-editor-wake.service" "$wake_unit_mnt" "$target_user"
+  browser_editor_write_unit_from_template \
+    "${asset_dir}/hb-browser-editor-idle.service" "$idle_unit_mnt" "$target_user"
+  install -m 0644 "${asset_dir}/hb-browser-editor-idle.timer" "$idle_timer_mnt"
+
+  browser_editor_systemctl "$root_mnt" enable caddy.service \
+    || log "WARNING: Failed to enable caddy.service."
+  browser_editor_systemctl "$root_mnt" enable hb-browser-editor-wake.service \
+    || log "WARNING: Failed to enable hb-browser-editor-wake.service."
+  browser_editor_systemctl "$root_mnt" enable hb-browser-editor-idle.timer \
+    || log "WARNING: Failed to enable hb-browser-editor-idle.timer."
+}
+
+browser_editor_activate_proxy_stack() {
+  local root_mnt="$1"
+
+  [[ -n "$root_mnt" ]] && return 0
+
+  browser_editor_systemctl "" daemon-reload
+  browser_editor_systemctl "" restart hb-browser-editor-wake.service \
+    || log "WARNING: Failed to restart hb-browser-editor-wake.service."
+  browser_editor_systemctl "" restart caddy.service \
+    || log "WARNING: Failed to restart caddy.service."
+  browser_editor_systemctl "" start hb-browser-editor-idle.timer \
+    || log "WARNING: Failed to start hb-browser-editor-idle.timer."
 
   sleep 2
-  if command -v ss >/dev/null 2>&1 && ss -tlnp | grep -q ':8080'; then
-    log "code-server is listening on :8080."
+  if command -v ss >/dev/null 2>&1 && ss -tlnp | grep -q ":${BROWSER_EDITOR_PUBLIC_PORT} "; then
+    log "Caddy is listening on :${BROWSER_EDITOR_PUBLIC_PORT} (code-server starts on first request)."
   else
-    log "WARNING: code-server does not appear to be listening on :8080 yet."
+    log "WARNING: Caddy does not appear to be listening on :${BROWSER_EDITOR_PUBLIC_PORT} yet."
   fi
 }
 
@@ -248,8 +385,8 @@ install_browser_editor() {
   local password="$3"
   local cert_cn="${4:-}"
   local resolved home target_uid target_gid
-  local workspace conf_dir cert_dir
-  local workspace_mnt conf_dir_mnt cert_dir_mnt
+  local workspace conf_dir
+  local workspace_mnt conf_dir_mnt
 
   [[ -n "$target_user" ]] || die "install_browser_editor: target user is required."
   [[ -n "$password" ]] || die "install_browser_editor: password is required."
@@ -265,21 +402,21 @@ install_browser_editor() {
   target_uid="${resolved[1]}"
   target_gid="${resolved[2]}"
 
-  # Runtime paths (used in config.yaml and systemd). Mount-prefixed paths are for file I/O only.
   workspace="${home}/${BROWSER_EDITOR_WORKSPACE_SUBPATH}"
   conf_dir="${home}/.config/code-server"
-  cert_dir="${conf_dir}/tls"
   workspace_mnt="$(browser_editor_path_prefix "$root_mnt" "$workspace")"
   conf_dir_mnt="$(browser_editor_path_prefix "$root_mnt" "$conf_dir")"
-  cert_dir_mnt="$(browser_editor_path_prefix "$root_mnt" "$cert_dir")"
 
   browser_editor_install_code_server "$root_mnt"
+  browser_editor_install_caddy "$root_mnt"
 
   log "Ensuring workspace exists: ${workspace}"
   install -d -o "$target_uid" -g "$target_gid" "$workspace_mnt"
   browser_editor_download_docs "$workspace_mnt" "$target_user" "$target_uid" "$target_gid" "$root_mnt"
   browser_editor_write_copilot_instructions "$workspace_mnt" "$target_uid" "$target_gid"
-  browser_editor_generate_tls_cert "$cert_dir_mnt" "$cert_cn" "$target_uid" "$target_gid"
+  browser_editor_generate_tls_cert "$root_mnt" "$cert_cn"
   browser_editor_write_config "$conf_dir_mnt" "$conf_dir" "$password" "$target_uid" "$target_gid"
-  browser_editor_configure_systemd "$root_mnt" "$target_user" "$workspace"
+  browser_editor_configure_code_server_dropin "$root_mnt" "$target_user" "$workspace"
+  browser_editor_install_proxy_stack "$root_mnt" "$target_user"
+  browser_editor_activate_proxy_stack "$root_mnt"
 }

@@ -1,0 +1,15 @@
+# Browser editor HTTPS front-end (Caddy). Managed by browser_editor_lib.sh.
+:__PUBLIC_PORT__ {
+	tls __TLS_DIR__/self.crt __TLS_DIR__/self.key
+
+	forward_auth __WAKE_ADDR__ {
+		uri /wake
+	}
+
+	reverse_proxy __UPSTREAM__ {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

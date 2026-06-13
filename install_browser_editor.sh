@@ -8,17 +8,23 @@
 # What it does:
 #   1. Installs code-server (browser VS Code, ARM64-compatible)
 #   2. Creates ~/systems/, pulls agentic-coding docs, writes copilot-instructions.md
-#   3. Generates a self-signed TLS cert so crypto.subtle works
-#      (required for Copilot Chat webview)
-#   4. Configures code-server: HTTPS, 0.0.0.0:8080, auth:password, login i18n
-#   5. Creates a systemd drop-in to open ~/systems at startup
-#   6. Enables and starts the code-server service
+#   3. Installs Caddy on :8080 (HTTPS) with a wake service and idle auto-stop
+#   4. code-server listens on 127.0.0.1:8081 only; starts on first browser request
+#   5. Stops code-server after 60 minutes with no requests (Caddy stays up)
 #
 # Usage:
 #   sudo ./install_browser_editor.sh
 #
 # After install:
 #   https://<pi-ip>:8080   — accept cert warning, then enter login password
+#   First visit after idle may take 15–30s while code-server starts.
+#
+# Verification:
+#   systemctl is-active code-server@<user>    # inactive until first HTTPS hit
+#   systemctl is-active caddy                 # active
+#   ss -tlnp | grep -E ':8080|:9082'          # Caddy + wake; not :8081 until in use
+#   curl -k -I https://127.0.0.1:8080/      # should start code-server
+#   systemctl is-active code-server@<user>    # active after curl
 #
 # -------------------------------------------------------------------
 

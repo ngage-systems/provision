@@ -1,0 +1,9 @@
+[Unit]
+Description=Check for idle browser editor periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

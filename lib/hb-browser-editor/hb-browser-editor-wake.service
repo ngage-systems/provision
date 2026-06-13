@@ -1,0 +1,17 @@
+[Unit]
+Description=Browser editor wake server (starts code-server on demand)
+After=network.target
+
+[Service]
+Type=simple
+RuntimeDirectory=hb-browser-editor
+Environment=BROWSER_EDITOR_USER=__BROWSER_EDITOR_USER__
+Environment=BROWSER_EDITOR_UPSTREAM=127.0.0.1:8081
+Environment=BROWSER_EDITOR_WAKE_BIND=127.0.0.1:9082
+Environment=BROWSER_EDITOR_STAMP=/run/hb-browser-editor/last-request
+Environment=BROWSER_EDITOR_WAKE_TIMEOUT=90
+ExecStart=/usr/bin/python3 /usr/local/lib/hb-browser-editor/wake-server.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
