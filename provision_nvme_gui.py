@@ -1580,6 +1580,8 @@ class ProvisioningWizard(tk.Tk):
         self.step_index = 0
         self._cloud_nav_frame = None
         self._restore_resume_state()
+        self._sync_defaults_profile_auto_apply()
+        self.step_index = self._first_non_skipped_step_index(self.step_index)
         self._maybe_self_update("startup")
 
         self._build_layout()
@@ -1719,6 +1721,7 @@ class ProvisioningWizard(tk.Tk):
         self._post_wifi_add_another_pending = bool(payload.get("post_wifi_add_another_pending"))
         self._loaded_resume_state = True
         self._sync_defaults_institution_from_group()
+        self._sync_defaults_profile_auto_apply()
         self._try_auto_confirm_display_profile()
 
         ssid = self.answers.get("wifi_ssid", "")
@@ -2316,6 +2319,9 @@ class ProvisioningWizard(tk.Tk):
             if self._should_skip_display_profile_step(name):
                 next_index += 1
                 continue
+            if self._should_skip_profile_step(name):
+                next_index += 1
+                continue
             break
         return next_index
 
@@ -2336,6 +2342,9 @@ class ProvisioningWizard(tk.Tk):
                 previous_index -= 1
                 continue
             if self._should_skip_display_profile_step(name):
+                previous_index -= 1
+                continue
+            if self._should_skip_profile_step(name):
                 previous_index -= 1
                 continue
             break
@@ -3494,6 +3503,63 @@ class ProvisioningWizard(tk.Tk):
         self.answers.pop("cloud_trial_ingest", None)
         self._display_profile_auto_confirmed = False
 
+    def _defaults_profile_locked_from_preset(self):
+        preset = (self._defaults_preset_group or "").strip()
+        return bool(preset and preset in self.groups)
+
+    def _should_skip_defaults_device_type_step(self):
+        group = (self.answers.get("defaults_group") or "").strip()
+        if not group:
+            return False
+        return len(device_types_for_group(self.config, group)) == 1
+
+    def _should_skip_profile_step(self, step_name):
+        if step_name == "_step_defaults_institution" and self._defaults_profile_locked_from_preset():
+            return True
+        if step_name == "_step_defaults_group" and self._defaults_profile_locked_from_preset():
+            return True
+        if step_name == "_step_defaults_device_type" and self._should_skip_defaults_device_type_step():
+            return True
+        return False
+
+    def _auto_apply_defaults_group_from_preset(self):
+        if not self._defaults_profile_locked_from_preset():
+            return
+        self.answers["defaults_group"] = self._defaults_preset_group
+        self._sync_defaults_institution_from_group()
+
+    def _auto_apply_single_device_type_if_needed(self):
+        group = (self.answers.get("defaults_group") or "").strip()
+        if not group:
+            return
+        types = device_types_for_group(self.config, group)
+        if len(types) != 1:
+            return
+        device_type = types[0]
+        section = f"{group}.{device_type}"
+        if not self.config.has_section(section):
+            return
+        self.answers["defaults_device_type"] = device_type
+        self.answers["defaults_section"] = section
+        self._apply_defaults_section(section)
+
+    def _sync_defaults_profile_auto_apply(self):
+        self._auto_apply_defaults_group_from_preset()
+        self._auto_apply_single_device_type_if_needed()
+
+    def _first_non_skipped_step_index(self, start_index=0):
+        if not self.steps:
+            return 0
+        index = max(0, min(start_index, len(self.steps) - 1))
+        while index < len(self.steps):
+            if self._should_skip_profile_step(self.steps[index].__name__):
+                index += 1
+                continue
+            break
+        if index >= len(self.steps):
+            return len(self.steps) - 1
+        return index
+
     def _apply_initial_defaults_from_env(self):
         section = os.environ.get("DEVICE_DEFAULTS_SECTION", "").strip()
         group = os.environ.get("DEVICE_DEFAULTS_GROUP", "").strip()
@@ -3515,6 +3581,7 @@ class ProvisioningWizard(tk.Tk):
                 self._sync_defaults_institution_from_group()
                 self._defaults_preset_device_type = parts[-1]
                 self._apply_defaults_section(section)
+            self._sync_defaults_profile_auto_apply()
             return
 
         if group in self.groups:
@@ -3532,6 +3599,8 @@ class ProvisioningWizard(tk.Tk):
                 if default_type:
                     self.answers["defaults_device_type"] = default_type
                     self._defaults_preset_device_type = default_type
+
+        self._sync_defaults_profile_auto_apply()
 
     def _apply_defaults_section(self, section):
         if not section or not self.config.has_section(section):
@@ -3600,10 +3669,7 @@ class ProvisioningWizard(tk.Tk):
             return
 
         self._add_label("Pick the institution for this device.")
-        preset_institution, _preset_lab = split_defaults_group(self._defaults_preset_group)
-        selected = self.answers.get("defaults_institution") or preset_institution or institutions[0]
-        if preset_institution and preset_institution in institutions:
-            self._add_label(f"Preset from this device: {preset_institution}", fg=MUTED)
+        selected = self.answers.get("defaults_institution") or institutions[0]
         self._defaults_institution_var, _ = self._add_listbox(institutions, selected)
 
     def _step_defaults_group(self):
@@ -3623,16 +3689,11 @@ class ProvisioningWizard(tk.Tk):
 
         self._add_title("Choose group")
         self._add_label(f"Pick the lab group within {institution}.")
-        preset_institution, preset_lab = split_defaults_group(self._defaults_preset_group)
         answer_institution, answer_lab = split_defaults_group(self.answers.get("defaults_group", ""))
         if answer_institution == institution and answer_lab in labs:
             selected = answer_lab
-        elif preset_institution == institution and preset_lab in labs:
-            selected = preset_lab
         else:
             selected = labs[0]
-        if preset_institution == institution and preset_lab and preset_lab in labs:
-            self._add_label(f"Preset from this device: {preset_lab}", fg=MUTED)
         self._defaults_group_var, _ = self._add_listbox(labs, selected)
 
     def _step_defaults_device_type(self):
@@ -3651,9 +3712,6 @@ class ProvisioningWizard(tk.Tk):
             self.answers.get("defaults_device_type")
             or default_device_type_for_group(self.config, group)
         )
-        preset_type = (self._defaults_preset_device_type or "").strip()
-        if preset_type and preset_type in types and selected == preset_type:
-            self._add_label(f"Preset from this device: {preset_type}", fg=MUTED)
         self._defaults_type_var, _ = self._add_listbox(
             types,
             selected,
@@ -4322,6 +4380,8 @@ class ProvisioningWizard(tk.Tk):
         step_name = self.steps[self.step_index].__name__
 
         if step_name == "_step_defaults_institution":
+            if self._defaults_profile_locked_from_preset():
+                return True
             value = self._defaults_institution_var.get().strip()
             if not value:
                 self._show_styled_error_modal("Required", "Please select an institution.")
@@ -4331,6 +4391,8 @@ class ProvisioningWizard(tk.Tk):
             self.answers["defaults_institution"] = value
 
         elif step_name == "_step_defaults_group":
+            if self._defaults_profile_locked_from_preset():
+                return True
             institution = (self.answers.get("defaults_institution") or "").strip()
             if not institution:
                 return True
@@ -4348,8 +4410,11 @@ class ProvisioningWizard(tk.Tk):
             if full_group != self.answers.get("defaults_group"):
                 self._clear_defaults_profile_selection()
             self.answers["defaults_group"] = full_group
+            self._auto_apply_single_device_type_if_needed()
 
         elif step_name == "_step_defaults_device_type":
+            if self._should_skip_defaults_device_type_step():
+                return True
             group = self.answers.get("defaults_group", "")
             if not group:
                 return True
