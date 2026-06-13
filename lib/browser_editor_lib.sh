@@ -224,7 +224,16 @@ browser_editor_generate_tls_cert() {
     || die "Failed to generate TLS certificate."
 
   if browser_editor_target_has_caddy_group "$root_mnt"; then
-    chown root:caddy "$key_file" "$crt_file"
+    # When provisioning a mounted rootfs, group names resolve against the host
+    # /etc/group — use the target caddy GID so chown works before first boot.
+    if [[ -n "$root_mnt" ]]; then
+      local caddy_gid
+      caddy_gid="$(awk -F: '$1 == "caddy" { print $3; exit }' "${root_mnt}/etc/group")"
+      [[ -n "$caddy_gid" ]] || die "caddy group missing from ${root_mnt}/etc/group"
+      chown "0:${caddy_gid}" "$key_file" "$crt_file"
+    else
+      chown root:caddy "$key_file" "$crt_file"
+    fi
     chmod 640 "$key_file"
     chmod 644 "$crt_file"
   else
