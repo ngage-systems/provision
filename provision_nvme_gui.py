@@ -216,6 +216,17 @@ def device_types_for_group(config, group):
     return sorted(types)
 
 
+def default_device_type_for_group(config, group):
+    types = device_types_for_group(config, group)
+    if not types:
+        return ""
+    if config.has_section(group):
+        preferred = config.get(group, "default_subgroup", fallback="").strip()
+        if preferred in types:
+            return preferred
+    return types[0]
+
+
 DISPLAY_PROFILE_INI_KEYS = (
     "screen_pixels_width",
     "screen_pixels_height",
@@ -3438,6 +3449,10 @@ class ProvisioningWizard(tk.Tk):
                     self.answers["defaults_device_type"] = subgroup
                     self.answers["defaults_section"] = candidate
                     self._apply_defaults_section(candidate)
+            else:
+                default_type = default_device_type_for_group(self.config, group)
+                if default_type:
+                    self.answers["defaults_device_type"] = default_type
 
     def _apply_defaults_section(self, section):
         if not section or not self.config.has_section(section):
@@ -3521,9 +3536,13 @@ class ProvisioningWizard(tk.Tk):
         self._add_label("This narrows the profile to the exact setup you are provisioning.")
         types = device_types_for_group(self.config, group)
         self._defaults_type_options = types
+        selected = (
+            self.answers.get("defaults_device_type")
+            or default_device_type_for_group(self.config, group)
+        )
         self._defaults_type_var, _ = self._add_listbox(
             types,
-            self.answers.get("defaults_device_type", types[0] if types else ""),
+            selected,
         )
 
     def _step_wifi_country(self):
@@ -3898,7 +3917,10 @@ class ProvisioningWizard(tk.Tk):
 
     def _step_monitor_distance(self):
         self._add_title("Viewing distance")
-        self._add_label("Enter the typical distance from the animal to the screen, in centimeters.")
+        self._add_label(
+            "Stimuli are presented in units of visual angle, which requires knowing how far the "
+            "animal is from the screen. Enter the typical viewing distance in centimeters."
+        )
         self._show_default_hint("monitor_distance_cm")
         self._monitor_distance_var, entry = self._add_entry(
             self.answers.get("monitor_distance_cm", DEFAULT_MONITOR_DISTANCE_CM)
