@@ -87,6 +87,7 @@ KEYBOARD_CTRL_SHIFT_W = _keyboard_scale(7)
 KEYBOARD_CTRL_SPACE_W = _keyboard_scale(18)
 KEYBOARD_CTRL_BACKSPACE_W = _keyboard_scale(10)
 KEYBOARD_CTRL_SMALL_W = _keyboard_scale(7)
+KEYBOARD_DEBOUNCE_S = 0.05
 
 # Deferred focus pass after map (ConfigureNotify / Wayland surface readiness).
 MODAL_FOCUS_RETRY_MS = 100
@@ -1852,7 +1853,7 @@ class ProvisioningWizard(tk.Tk):
 
         def invoke_once():
             now = time.monotonic()
-            if now - invoked_at["time"] < 0.25:
+            if now - invoked_at["time"] < KEYBOARD_DEBOUNCE_S:
                 return
             invoked_at["time"] = now
             command()
