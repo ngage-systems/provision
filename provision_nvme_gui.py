@@ -538,6 +538,21 @@ def _parse_iw_scan_wifi_rows(text):
     return rows
 
 
+def _dedupe_wifi_scan_rows(rows):
+    """Keep one row per SSID, preferring the strongest signal (_sort)."""
+    best_by_ssid = {}
+    for row in rows:
+        ssid = (row.get("ssid") or "").strip()
+        if not ssid:
+            continue
+        current = best_by_ssid.get(ssid)
+        if current is None or row.get("_sort", 0.0) > current.get("_sort", 0.0):
+            best_by_ssid[ssid] = row
+    deduped = list(best_by_ssid.values())
+    deduped.sort(key=lambda r: (-r["_sort"], r["ssid"].lower()))
+    return deduped
+
+
 def _format_wifi_scan_list_line(row, ssid_width=28):
     ssid = row["ssid"]
     if len(ssid) > ssid_width:
@@ -606,9 +621,9 @@ def scan_wifi_ssids(wifi_country=""):
     for cmd in commands:
         result = quick_command(cmd, timeout=15)
         if result.returncode == 0:
-            rows = _parse_nmcli_wifi_rows(result.stdout.splitlines())
+            rows = _dedupe_wifi_scan_rows(_parse_nmcli_wifi_rows(result.stdout.splitlines()))
             if rows:
-                return rows, f"Found {len(rows)} network row(s) with nmcli."
+                return rows, f"Found {len(rows)} network(s) with nmcli."
         elif result.stderr.strip():
             diagnostics.append(result.stderr.strip())
 
@@ -620,9 +635,9 @@ def scan_wifi_ssids(wifi_country=""):
                 if result.stderr.strip():
                     diagnostics.append(result.stderr.strip())
                 continue
-            rows = _parse_iw_scan_wifi_rows(result.stdout)
+            rows = _dedupe_wifi_scan_rows(_parse_iw_scan_wifi_rows(result.stdout))
             if rows:
-                return rows, f"Found {len(rows)} network row(s) with iw on {iface}."
+                return rows, f"Found {len(rows)} network(s) with iw on {iface}."
 
     if not shutil.which("nmcli") and not shutil.which("iw"):
         return [], "Neither nmcli nor iw is available for Wi-Fi scanning."
