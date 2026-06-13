@@ -1533,6 +1533,7 @@ class ProvisioningWizard(tk.Tk):
         self._last_wifi_test_signature = None
         self._wifi_ssid_manual_flow = False
         self._display_profile_auto_confirmed = False
+        self._wifi_country_from_ini = False
         self._provisioning_active = False
         self._defaults_preset_group = ""
         self._defaults_preset_device_type = ""
@@ -2322,6 +2323,9 @@ class ProvisioningWizard(tk.Tk):
             if self._should_skip_profile_step(name):
                 next_index += 1
                 continue
+            if name == "_step_wifi_country" and self._should_skip_wifi_country_step():
+                next_index += 1
+                continue
             break
         return next_index
 
@@ -2345,6 +2349,9 @@ class ProvisioningWizard(tk.Tk):
                 previous_index -= 1
                 continue
             if self._should_skip_profile_step(name):
+                previous_index -= 1
+                continue
+            if name == "_step_wifi_country" and self._should_skip_wifi_country_step():
                 previous_index -= 1
                 continue
             break
@@ -3501,7 +3508,35 @@ class ProvisioningWizard(tk.Tk):
         self.answers.pop("defaults_device_type", None)
         self.answers.pop("defaults_section", None)
         self.answers.pop("cloud_trial_ingest", None)
+        self.answers["wifi_country"] = DEFAULT_WIFI_COUNTRY
         self._display_profile_auto_confirmed = False
+        self._wifi_country_from_ini = False
+
+    def _ini_get_with_group_fallback(self, key, section=None, group=None):
+        section = (section or self.answers.get("defaults_section") or "").strip()
+        group = (group or self.answers.get("defaults_group") or "").strip()
+        candidates = []
+        if section:
+            candidates.append(section)
+            if "." in section:
+                candidates.append(section.rsplit(".", 1)[0])
+        if group:
+            candidates.append(group)
+        for candidate in dict.fromkeys(candidates):
+            if not self.config.has_section(candidate):
+                continue
+            value = self.config.get(candidate, key, fallback="").strip()
+            if value:
+                return value
+        return ""
+
+    def _apply_wifi_country_from_ini(self):
+        value = self._ini_get_with_group_fallback("wifi_country").upper()
+        if re.fullmatch(r"[A-Z]{2}", value):
+            self.answers["wifi_country"] = value
+            self._wifi_country_from_ini = True
+        else:
+            self._wifi_country_from_ini = False
 
     def _defaults_profile_locked_from_preset(self):
         preset = (self._defaults_preset_group or "").strip()
@@ -3546,13 +3581,21 @@ class ProvisioningWizard(tk.Tk):
     def _sync_defaults_profile_auto_apply(self):
         self._auto_apply_defaults_group_from_preset()
         self._auto_apply_single_device_type_if_needed()
+        self._apply_wifi_country_from_ini()
+
+    def _should_skip_wifi_country_step(self):
+        return self._wifi_country_from_ini
 
     def _first_non_skipped_step_index(self, start_index=0):
         if not self.steps:
             return 0
         index = max(0, min(start_index, len(self.steps) - 1))
         while index < len(self.steps):
-            if self._should_skip_profile_step(self.steps[index].__name__):
+            name = self.steps[index].__name__
+            if self._should_skip_profile_step(name):
+                index += 1
+                continue
+            if name == "_step_wifi_country" and self._should_skip_wifi_country_step():
                 index += 1
                 continue
             break
@@ -3610,7 +3653,6 @@ class ProvisioningWizard(tk.Tk):
             "username": "username",
             "timezone": "timezone",
             "locale": "locale",
-            "wifi_country": "wifi_country",
             "screen_pixels_width": "screen_pixels_width",
             "screen_pixels_height": "screen_pixels_height",
             "screen_refresh_rate": "screen_refresh_rate",
@@ -3623,6 +3665,7 @@ class ProvisioningWizard(tk.Tk):
             value = self.config.get(section, ini_key, fallback="").strip()
             if value:
                 self.answers[answer_key] = value
+        self._apply_wifi_country_from_ini()
         self._try_auto_confirm_display_profile()
 
     def _should_skip_display_profile_step(self, step_name):
@@ -4411,6 +4454,7 @@ class ProvisioningWizard(tk.Tk):
                 self._clear_defaults_profile_selection()
             self.answers["defaults_group"] = full_group
             self._auto_apply_single_device_type_if_needed()
+            self._apply_wifi_country_from_ini()
 
         elif step_name == "_step_defaults_device_type":
             if self._should_skip_defaults_device_type_step():
@@ -4432,6 +4476,8 @@ class ProvisioningWizard(tk.Tk):
             self.answers.pop("cloud_trial_ingest", None)
 
         elif step_name == "_step_wifi_country":
+            if self._should_skip_wifi_country_step():
+                return True
             value = self._wifi_country_var.get().strip().upper() or DEFAULT_WIFI_COUNTRY
             if not re.fullmatch(r"[A-Z]{2}", value):
                 self._show_styled_error_modal("Invalid", "Wi-Fi country must be 2 letters like US.")

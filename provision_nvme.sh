@@ -400,6 +400,9 @@ load_defaults() {
   val="$(ini_get "$DEFAULTS_FILE" "$DEFAULTS_SECTION" "locale")"
   [[ -n "$val" ]] && DEFAULT_LOCALE="$val"
   val="$(ini_get "$DEFAULTS_FILE" "$DEFAULTS_SECTION" "wifi_country")"
+  if [[ -z "$val" && -n "$meta" ]] && ini_section_exists "$DEFAULTS_FILE" "$meta"; then
+    val="$(ini_get "$DEFAULTS_FILE" "$meta" "wifi_country")"
+  fi
   [[ -n "$val" ]] && DEFAULT_WIFI_COUNTRY="$val"
   val="$(ini_get "$DEFAULTS_FILE" "$DEFAULTS_SECTION" "screen_pixels_width")"
   [[ -n "$val" ]] && DEFAULT_SCREEN_PIXELS_WIDTH="$val"
