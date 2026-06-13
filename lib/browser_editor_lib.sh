@@ -169,39 +169,38 @@ browser_editor_generate_tls_cert() {
 }
 
 browser_editor_write_config() {
-  local conf_dir="$1"
-  local cert_dir="$2"
-  local workspace="$3"
-  local password="$4"
-  local target_uid="$5"
-  local target_gid="$6"
-  local i18n_file config_file
+  local conf_dir_mnt="$1"
+  local conf_dir="$2"
+  local password="$3"
+  local target_uid="$4"
+  local target_gid="$5"
+  local i18n_file_mnt config_file_mnt
 
   log "Writing code-server config..."
-  install -d -o "$target_uid" -g "$target_gid" "$conf_dir"
+  install -d -o "$target_uid" -g "$target_gid" "$conf_dir_mnt"
 
-  i18n_file="${conf_dir}/login-i18n.json"
-  cat >"$i18n_file" <<'EOF'
+  i18n_file_mnt="${conf_dir_mnt}/login-i18n.json"
+  cat >"$i18n_file_mnt" <<'EOF'
 {
   "LOGIN_PASSWORD": "Enter the password set when provisioning this system. It is the same as the password used for SSH access."
 }
 EOF
-  chown "${target_uid}:${target_gid}" "$i18n_file"
-  chmod 644 "$i18n_file"
+  chown "${target_uid}:${target_gid}" "$i18n_file_mnt"
+  chmod 644 "$i18n_file_mnt"
 
-  config_file="${conf_dir}/config.yaml"
-  cat >"$config_file" <<EOF
+  config_file_mnt="${conf_dir_mnt}/config.yaml"
+  cat >"$config_file_mnt" <<EOF
 # code-server configuration
 # Managed by browser_editor_lib.sh — edit carefully
 bind-addr: ${BROWSER_EDITOR_CODE_BIND}
 auth: password
 password: $(browser_editor_yaml_single_quote "$password")
-i18n: ${i18n_file}
-cert: ${cert_dir}/self.crt
-cert-key: ${cert_dir}/self.key
+i18n: ${conf_dir}/login-i18n.json
+cert: ${conf_dir}/tls/self.crt
+cert-key: ${conf_dir}/tls/self.key
 EOF
-  chown "${target_uid}:${target_gid}" "$config_file"
-  chmod 600 "$config_file"
+  chown "${target_uid}:${target_gid}" "$config_file_mnt"
+  chmod 600 "$config_file_mnt"
 }
 
 browser_editor_configure_systemd() {
@@ -248,7 +247,9 @@ install_browser_editor() {
   local target_user="$2"
   local password="$3"
   local cert_cn="${4:-}"
-  local resolved home target_uid target_gid workspace conf_dir cert_dir
+  local resolved home target_uid target_gid
+  local workspace conf_dir cert_dir
+  local workspace_mnt conf_dir_mnt cert_dir_mnt
 
   [[ -n "$target_user" ]] || die "install_browser_editor: target user is required."
   [[ -n "$password" ]] || die "install_browser_editor: password is required."
@@ -264,17 +265,21 @@ install_browser_editor() {
   target_uid="${resolved[1]}"
   target_gid="${resolved[2]}"
 
-  workspace="$(browser_editor_path_prefix "$root_mnt" "${home}/${BROWSER_EDITOR_WORKSPACE_SUBPATH}")"
-  conf_dir="$(browser_editor_path_prefix "$root_mnt" "${home}/.config/code-server")"
+  # Runtime paths (used in config.yaml and systemd). Mount-prefixed paths are for file I/O only.
+  workspace="${home}/${BROWSER_EDITOR_WORKSPACE_SUBPATH}"
+  conf_dir="${home}/.config/code-server"
   cert_dir="${conf_dir}/tls"
+  workspace_mnt="$(browser_editor_path_prefix "$root_mnt" "$workspace")"
+  conf_dir_mnt="$(browser_editor_path_prefix "$root_mnt" "$conf_dir")"
+  cert_dir_mnt="$(browser_editor_path_prefix "$root_mnt" "$cert_dir")"
 
   browser_editor_install_code_server "$root_mnt"
 
   log "Ensuring workspace exists: ${workspace}"
-  install -d -o "$target_uid" -g "$target_gid" "$workspace"
-  browser_editor_download_docs "$workspace" "$target_user" "$target_uid" "$target_gid" "$root_mnt"
-  browser_editor_write_copilot_instructions "$workspace" "$target_uid" "$target_gid"
-  browser_editor_generate_tls_cert "$cert_dir" "$cert_cn" "$target_uid" "$target_gid"
-  browser_editor_write_config "$conf_dir" "$cert_dir" "$workspace" "$password" "$target_uid" "$target_gid"
+  install -d -o "$target_uid" -g "$target_gid" "$workspace_mnt"
+  browser_editor_download_docs "$workspace_mnt" "$target_user" "$target_uid" "$target_gid" "$root_mnt"
+  browser_editor_write_copilot_instructions "$workspace_mnt" "$target_uid" "$target_gid"
+  browser_editor_generate_tls_cert "$cert_dir_mnt" "$cert_cn" "$target_uid" "$target_gid"
+  browser_editor_write_config "$conf_dir_mnt" "$conf_dir" "$password" "$target_uid" "$target_gid"
   browser_editor_configure_systemd "$root_mnt" "$target_user" "$workspace"
 }
