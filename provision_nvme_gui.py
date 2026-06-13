@@ -216,6 +216,52 @@ def device_types_for_group(config, group):
     return sorted(types)
 
 
+DISPLAY_PROFILE_INI_KEYS = (
+    "screen_pixels_width",
+    "screen_pixels_height",
+    "screen_refresh_rate",
+    "monitor_width_cm",
+    "monitor_height_cm",
+)
+
+DISPLAY_PROFILE_STEP_NAMES = {
+    "_step_screen_width",
+    "_step_monitor_width",
+    "_step_screen_height",
+    "_step_monitor_height",
+    "_step_screen_refresh_rate",
+}
+
+
+def profile_display_keys_complete(config, section):
+    if not section or not config.has_section(section):
+        return False
+    return all(config.get(section, key, fallback="").strip() for key in DISPLAY_PROFILE_INI_KEYS)
+
+
+def detect_connected_hdmi_display_pixels():
+    """Return (width, height) from the first connected HDMI-A DRM connector, or None."""
+    drm_root = Path("/sys/class/drm")
+    if not drm_root.is_dir():
+        return None
+    for status_path in sorted(drm_root.glob("card*-HDMI-A-*/status")):
+        try:
+            if status_path.read_text(encoding="utf-8").strip() != "connected":
+                continue
+        except OSError:
+            continue
+        modes_path = status_path.parent / "modes"
+        try:
+            mode_line = modes_path.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError):
+            continue
+        match = re.match(r"^(\d+)x(\d+)", mode_line)
+        if not match:
+            continue
+        return int(match.group(1)), int(match.group(2))
+    return None
+
+
 def read_hostname_default():
     try:
         return Path("/etc/hostname").read_text(encoding="utf-8").strip()
@@ -1444,6 +1490,7 @@ class ProvisioningWizard(tk.Tk):
         self._keyboard_rows_frame = None
         self._last_wifi_test_signature = None
         self._wifi_ssid_manual_flow = False
+        self._display_profile_auto_confirmed = False
 
         self.answers = {
             "wifi_country": DEFAULT_WIFI_COUNTRY,
@@ -1625,6 +1672,7 @@ class ProvisioningWizard(tk.Tk):
         self._wifi_ssid_manual_flow = target_step == "_step_wifi_ssid_manual"
         self._post_wifi_add_another_pending = bool(payload.get("post_wifi_add_another_pending"))
         self._loaded_resume_state = True
+        self._try_auto_confirm_display_profile()
 
         ssid = self.answers.get("wifi_ssid", "")
         password = self.answers.get("wifi_password", "")
@@ -2218,6 +2266,9 @@ class ProvisioningWizard(tk.Tk):
                 ensure_boot_target_device_answer(self.answers)
                 next_index += 1
                 continue
+            if self._should_skip_display_profile_step(name):
+                next_index += 1
+                continue
             break
         return next_index
 
@@ -2235,6 +2286,9 @@ class ProvisioningWizard(tk.Tk):
                 previous_index -= 1
                 continue
             if name == "_step_boot_target_device" and not boot_target_choice_required():
+                previous_index -= 1
+                continue
+            if self._should_skip_display_profile_step(name):
                 previous_index -= 1
                 continue
             break
@@ -3406,6 +3460,37 @@ class ProvisioningWizard(tk.Tk):
             value = self.config.get(section, ini_key, fallback="").strip()
             if value:
                 self.answers[answer_key] = value
+        self._try_auto_confirm_display_profile()
+
+    def _should_skip_display_profile_step(self, step_name):
+        return (
+            self._display_profile_auto_confirmed
+            and step_name in DISPLAY_PROFILE_STEP_NAMES
+        )
+
+    def _try_auto_confirm_display_profile(self):
+        section = (self.answers.get("defaults_section") or "").strip()
+        if not profile_display_keys_complete(self.config, section):
+            self._display_profile_auto_confirmed = False
+            return
+
+        try:
+            profile_w = int(self.answers.get("screen_pixels_width", ""))
+            profile_h = int(self.answers.get("screen_pixels_height", ""))
+        except ValueError:
+            self._display_profile_auto_confirmed = False
+            return
+
+        detected = detect_connected_hdmi_display_pixels()
+        if detected == (profile_w, profile_h):
+            self._display_profile_auto_confirmed = True
+        else:
+            self._display_profile_auto_confirmed = False
+
+    def _display_profile_review_suffix(self):
+        if not self._display_profile_auto_confirmed:
+            return ""
+        return " (matched HDMI profile)"
 
     # ------------------------------------------------------------------
     # Steps
@@ -3967,12 +4052,27 @@ class ProvisioningWizard(tk.Tk):
             ("Boot target", self._boot_target_review_summary()),
             ("Timezone", self.answers.get("timezone", "")),
             ("Locale", self.answers.get("locale", "")),
-            ("Screen width (px)", self.answers.get("screen_pixels_width", "")),
-            ("Monitor width (cm)", self.answers.get("monitor_width_cm", "")),
-            ("Screen height (px)", self.answers.get("screen_pixels_height", "")),
-            ("Monitor height (cm)", self.answers.get("monitor_height_cm", "")),
+            (
+                "Screen width (px)",
+                f"{self.answers.get('screen_pixels_width', '')}{self._display_profile_review_suffix()}",
+            ),
+            (
+                "Monitor width (cm)",
+                f"{self.answers.get('monitor_width_cm', '')}{self._display_profile_review_suffix()}",
+            ),
+            (
+                "Screen height (px)",
+                f"{self.answers.get('screen_pixels_height', '')}{self._display_profile_review_suffix()}",
+            ),
+            (
+                "Monitor height (cm)",
+                f"{self.answers.get('monitor_height_cm', '')}{self._display_profile_review_suffix()}",
+            ),
             ("Viewing distance (cm)", self.answers.get("monitor_distance_cm", "")),
-            ("Refresh rate (Hz)", self.answers.get("screen_refresh_rate", "")),
+            (
+                "Refresh rate (Hz)",
+                f"{self.answers.get('screen_refresh_rate', '')}{self._display_profile_review_suffix()}",
+            ),
             ("Screen rotation", self.answers.get("screen_rotation", "")),
             ("Hostname", self.answers.get("hostname", "")),
             ("Username", self.answers.get("username", "")),
@@ -4090,6 +4190,7 @@ class ProvisioningWizard(tk.Tk):
             self.answers.pop("defaults_device_type", None)
             self.answers.pop("defaults_section", None)
             self.answers.pop("cloud_trial_ingest", None)
+            self._display_profile_auto_confirmed = False
 
         elif step_name == "_step_defaults_device_type":
             group = self.answers.get("defaults_group", "")
