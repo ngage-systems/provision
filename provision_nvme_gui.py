@@ -97,6 +97,7 @@ WIFI_GUEST_NETWORK_HINT = (
     "Avoid guest or visitor networks — they often require a browser sign-in portal "
     "that this setup cannot complete."
 )
+WIFI_24GHZ_RECOMMENDATION_HINT = "We recommend 2.4 Ghz networks where possible."
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_LOCALE = "en_us"
 DEFAULT_MONITOR_WIDTH_CM = "21.7"
@@ -3259,15 +3260,13 @@ class ProvisioningWizard(tk.Tk):
             "Continue anyway?",
         )
 
-    def _connectivity_checklist_modal(self, rows, *, allow_redo_wifi=False):
+    def _connectivity_checklist_modal(self, rows):
         """Show per-check results.
 
-        Returns one of retry | back | continue, or redo_wifi when allow_redo_wifi is True.
-        Window close acts as Back (never implies a silent full Wi‑Fi retest).
+        Returns one of retry | back | continue.
+        Window close acts as Back.
         """
         valid_choices = {"retry", "back", "continue"}
-        if allow_redo_wifi:
-            valid_choices = valid_choices | {"redo_wifi"}
 
         dialog = tk.Toplevel(self)
         dialog.title("Connectivity check")
@@ -3305,10 +3304,6 @@ class ProvisioningWizard(tk.Tk):
         )
         retry_button.pack(side="left")
         self._make_button(buttons, "Back", lambda: action.set("back")).pack(side="left", padx=15)
-        if allow_redo_wifi:
-            self._make_button(buttons, "Test Wi‑Fi again", lambda: action.set("redo_wifi")).pack(
-                side="left", padx=15
-            )
         self._make_button(buttons, "Continue anyway", lambda: action.set("continue")).pack(side="right")
 
         body_lines = summarize_connectivity_rows(rows)
@@ -3924,6 +3919,7 @@ class ProvisioningWizard(tk.Tk):
                 "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
                 "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list."
             )
+        self._add_label(WIFI_24GHZ_RECOMMENDATION_HINT, fg=MUTED)
         self._add_label(WIFI_GUEST_NETWORK_HINT, fg=MUTED)
         self._refresh_wifi_scan(force=False)
 
@@ -4795,7 +4791,6 @@ class ProvisioningWizard(tk.Tk):
                     )
                     test_signature = (ssid, value, hidden_now)
 
-                    redo_full_wifi = False
                     while True:
                         wifi_probe_ok = bool(result.get("internet_reachable"))
                         try:
@@ -4829,14 +4824,9 @@ class ProvisioningWizard(tk.Tk):
                             break
 
                         self.answers["connectivity_checks_last_report"] = [dict(r) for r in failure_rows]
-                        choice = self._connectivity_checklist_modal(
-                            failure_rows, allow_redo_wifi=True
-                        )
+                        choice = self._connectivity_checklist_modal(failure_rows)
                         if choice == "retry":
                             continue
-                        if choice == "redo_wifi":
-                            redo_full_wifi = True
-                            break
                         if choice == "back":
                             self.step_index = self.steps.index(self._step_wifi_ssid_pick)
                             self._render_current_step()
@@ -4849,9 +4839,6 @@ class ProvisioningWizard(tk.Tk):
                                 self._last_wifi_test_signature = test_signature
                                 break
                             continue
-
-                    if redo_full_wifi:
-                        continue
 
                     break
 
