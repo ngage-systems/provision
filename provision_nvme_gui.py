@@ -1601,7 +1601,7 @@ class ProvisioningWizard(tk.Tk):
         screen_h = max(1, self.winfo_screenheight())
         margin_left = 10
         margin_right = 10 if screen_w > 800 else 0
-        margin_top = 48 if screen_h > 480 else 10
+        margin_top = 72 if screen_h > 480 else 10
         margin_bottom = 10
         width = min(1280, max(640, screen_w - margin_left - margin_right))
         height = min(800, max(420, screen_h - margin_top - margin_bottom))
