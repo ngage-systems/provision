@@ -6,7 +6,7 @@ This replaces the old interactive shell questions with a touch-friendly flow.
 It collects answers, validates Wi-Fi when requested, writes JSON output, and
 launches provision_nvme.sh after the user confirms the destructive erase step.
 
-Disable automatic git fetch/merge before the wizard runs with ``--no-self-update``
+Disable automatic git fetch/reset before the wizard runs with ``--no-self-update``
 or ``HB_PROVISION_NO_SELF_UPDATE=1``. The same setting is passed to
 ``provision_nvme.sh`` as ``--no-self-update`` when the GUI launches the backend
 (so ``sudo`` does not strip it).
@@ -1067,20 +1067,12 @@ def update_current_repo_if_needed(script_path):
     if before == target:
         return {"ok": True, "updated": False, "message": "Already up to date."}
 
-    dirty_result = git_command(repo_root, ["status", "--porcelain"], timeout=10)
-    if dirty_result.returncode == 0 and dirty_result.stdout.strip():
+    reset_result = git_command(repo_root, ["reset", "--hard", origin_head], timeout=90)
+    if reset_result.returncode != 0:
         return {
             "ok": False,
             "updated": False,
-            "message": "The local checkout has uncommitted changes, so the GUI did not update automatically.",
-        }
-
-    merge_result = git_command(repo_root, ["merge", "--ff-only", origin_head], timeout=90)
-    if merge_result.returncode != 0:
-        return {
-            "ok": False,
-            "updated": False,
-            "message": f"git update failed: {merge_result.stderr.strip() or merge_result.stdout.strip()}",
+            "message": f"git update failed: {reset_result.stderr.strip() or reset_result.stdout.strip()}",
         }
 
     after_result = git_command(repo_root, ["rev-parse", "HEAD"], timeout=10)
@@ -4931,7 +4923,7 @@ def parse_args():
     parser.add_argument(
         "--no-self-update",
         action="store_true",
-        help="Do not git fetch/merge for this repo or provision_nvme.sh (also HB_PROVISION_NO_SELF_UPDATE=1).",
+        help="Do not git fetch/reset for this repo or provision_nvme.sh (also HB_PROVISION_NO_SELF_UPDATE=1).",
     )
     return parser.parse_args()
 

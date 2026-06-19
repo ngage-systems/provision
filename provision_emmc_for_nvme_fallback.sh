@@ -1062,9 +1062,6 @@ EOF
   git clone https://github.com/ngage-systems/provision.git "$repo_dir"
 
   log "Setting ownership on fallback home directory..."
-  chmod +x "${repo_dir}/provision_emmc_for_nvme_fallback.sh" || true
-  chmod +x "${repo_dir}/provision_nvme.sh" || true
-  chmod +x "${repo_dir}/provision_nvme_gui.py" || true
   chown -R 1000:1000 "$home_dir"
 
   if [[ "$rotate_choice" == "yes" ]]; then
