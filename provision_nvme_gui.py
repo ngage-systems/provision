@@ -3912,15 +3912,15 @@ class ProvisioningWizard(tk.Tk):
             self._add_label(
                 "Select another network and tap Next to add it, or tap Next with nothing selected to "
                 "continue using the Wi-Fi networks you already saved. "
-                "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list."
+                "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list. "
+                f"{WIFI_24GHZ_RECOMMENDATION_HINT} {WIFI_GUEST_NETWORK_HINT}"
             )
         else:
             self._add_label(
                 "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
-                "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list."
+                "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list. "
+                f"{WIFI_24GHZ_RECOMMENDATION_HINT} {WIFI_GUEST_NETWORK_HINT}"
             )
-        self._add_label(WIFI_24GHZ_RECOMMENDATION_HINT, fg=MUTED)
-        self._add_label(WIFI_GUEST_NETWORK_HINT, fg=MUTED)
         self._refresh_wifi_scan(force=False)
 
         scan_row = tk.Frame(self.content, bg=BG)
