@@ -93,11 +93,7 @@ KEYBOARD_DEBOUNCE_S = 0.05
 MODAL_FOCUS_RETRY_MS = 100
 
 DEFAULT_WIFI_COUNTRY = "US"
-WIFI_GUEST_NETWORK_HINT = (
-    "Avoid guest or visitor networks — they often require a browser sign-in portal "
-    "that this setup cannot complete."
-)
-WIFI_24GHZ_RECOMMENDATION_HINT = "We recommend 2.4 Ghz networks where possible."
+WIFI_SETUP_HINT = "Prefer 2.4 GHz; avoid guest networks (browser sign-in required)."
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_LOCALE = "en_us"
 DEFAULT_MONITOR_WIDTH_CM = "21.7"
@@ -1603,12 +1599,15 @@ class ProvisioningWizard(tk.Tk):
     def _configure_window_size(self):
         screen_w = max(1, self.winfo_screenwidth())
         screen_h = max(1, self.winfo_screenheight())
-        margin_x = 20 if screen_w > 800 else 0
-        margin_y = 60 if screen_h > 480 else 0
-        width = min(1280, max(640, screen_w - margin_x))
-        height = min(800, max(420, screen_h - margin_y))
-        self.geometry(f"{width}x{height}+10+10")
+        margin_left = 10
+        margin_right = 10 if screen_w > 800 else 0
+        margin_top = 48 if screen_h > 480 else 10
+        margin_bottom = 10
+        width = min(1280, max(640, screen_w - margin_left - margin_right))
+        height = min(800, max(420, screen_h - margin_top - margin_bottom))
+        self.geometry(f"{width}x{height}+{margin_left}+{margin_top}")
         self.minsize(min(760, width), min(420, height))
+        self.maxsize(width, height)
 
     def _configure_wifi_hidden_pick_checkbox_style(self):
         """ttk backup style (clam + indicator colors); SSID pick uses canvas toggle for clarity."""
@@ -3902,17 +3901,13 @@ class ProvisioningWizard(tk.Tk):
         self._add_title("Choose Wi-Fi network")
         if self._wifi_saved_networks_list():
             self._add_label(
-                "Select another network and tap Next to add it, or tap Next with nothing selected to "
-                "continue using the Wi-Fi networks you already saved. "
-                "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list. "
-                f"{WIFI_24GHZ_RECOMMENDATION_HINT} {WIFI_GUEST_NETWORK_HINT}"
+                "Pick another network and tap Next, or tap Next with nothing selected to keep saved networks."
             )
         else:
             self._add_label(
-                "Select a network from the list and tap Next, or tap Next with nothing selected to use Ethernet. "
-                "If your network does not appear, tap Rescan Wi-Fi or specify an SSID below the list. "
-                f"{WIFI_24GHZ_RECOMMENDATION_HINT} {WIFI_GUEST_NETWORK_HINT}"
+                "Pick a network and tap Next, or tap Next with nothing selected to use Ethernet."
             )
+        self._add_label(WIFI_SETUP_HINT, fg=MUTED)
         self._refresh_wifi_scan(force=False)
 
         scan_row = tk.Frame(self.content, bg=BG)
@@ -4013,7 +4008,7 @@ class ProvisioningWizard(tk.Tk):
     def _step_wifi_ssid_manual(self):
         self._add_title("Enter Wi-Fi network name")
         self._add_label("Type the SSID exactly. Use the checkbox if the network does not broadcast its name.")
-        self._add_label(WIFI_GUEST_NETWORK_HINT, fg=MUTED)
+        self._add_label(WIFI_SETUP_HINT, fg=MUTED)
         self._wifi_ssid_var, entry = self._add_entry(self.answers.get("wifi_ssid", ""))
         self._wifi_hidden_var = tk.BooleanVar(value=bool(self.answers.get("wifi_hidden")))
         hid_row = tk.Frame(self.content, bg=BG)
