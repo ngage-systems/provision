@@ -1090,6 +1090,11 @@ EOF
     fi
   fi
 
+  mkdir -p "${root_mnt}/etc/modprobe.d"
+  cat > "${root_mnt}/etc/modprobe.d/brcmfmac.conf" <<'EOF'
+options brcmfmac roamoff=1
+EOF
+
   log "Writing trial ingest secret on fallback root..."
   write_trial_ingest_secret "$trial_ingest_secret" "$root_mnt"
 }

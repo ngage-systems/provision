@@ -2322,6 +2322,11 @@ EOF
   chmod 600 "${nm_state_dir}/NetworkManager.state"
   chown root:root "${nm_state_dir}/NetworkManager.state"
 
+  mkdir -p "${root_mnt}/etc/modprobe.d"
+  cat > "${root_mnt}/etc/modprobe.d/brcmfmac.conf" <<'EOF'
+options brcmfmac roamoff=1
+EOF
+
   if [[ -f /etc/udev/rules.d/99-touchscreen-rotate.rules ]]; then
     mkdir -p "${root_mnt}/etc/udev/rules.d"
     cp /etc/udev/rules.d/99-touchscreen-rotate.rules "${root_mnt}/etc/udev/rules.d/99-touchscreen-rotate.rules"
