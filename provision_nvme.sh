@@ -11,6 +11,8 @@ set -euo pipefail
 # - Configure Wi-Fi (optional) and verify internet connectivity
 # - Flash Raspberry Pi OS Lite arm64 to NVMe and expand the root filesystem
 # - Configure headless settings: SSH, user, hostname, Wi-Fi, timezone, locale
+# - Wi-Fi profiles: ipv4.dad-timeout=0; global NetworkManager wifi.powersave=2 (disabled)
+# - Persistent systemd-journald logs under /var/log/journal on NVMe rootfs
 # - Configure display mode/rotation and monitor geometry
 # - Install dserv stack + ESS repo + lazy browser editor (Caddy + code-server on demand) in NVMe rootfs
 # - Copy /etc/dserv/trial_ingest_secret from the fallback host rootfs when present (written by provision_emmc_for_nvme_fallback.sh)
@@ -2204,6 +2206,7 @@ for idx, (ssid, pw, is_hidden) in enumerate(load_networks(), start=1):
             "",
             "[ipv4]",
             "method=auto",
+            "dad-timeout=0",
             "",
             "[ipv6]",
             "method=auto",
@@ -2321,6 +2324,12 @@ WWANEnabled=true
 EOF
   chmod 600 "${nm_state_dir}/NetworkManager.state"
   chown root:root "${nm_state_dir}/NetworkManager.state"
+
+  mkdir -p "${root_mnt}/etc/NetworkManager/conf.d"
+  cat > "${root_mnt}/etc/NetworkManager/conf.d/wifi-powersave.conf" <<'EOF'
+[connection]
+wifi.powersave=2
+EOF
 
   mkdir -p "${root_mnt}/etc/modprobe.d"
   cat > "${root_mnt}/etc/modprobe.d/brcmfmac.conf" <<'EOF'
@@ -2588,6 +2597,32 @@ host_provision_swap_activate_if_needed() {
   fi
   HB_HOST_PROVISION_SWAP_ON=1
   log "Temporary provisioning swap active."
+}
+
+configure_persistent_journal_root() {
+  local root_mnt="$1"
+  local journald_dropin="${root_mnt}/etc/systemd/journald.conf.d/persistent.conf"
+  log "Enabling persistent journald storage in NVMe rootfs..."
+
+  if have_cmd systemd-tmpfiles; then
+    systemd-tmpfiles --create --prefix /var/log/journal --root "$root_mnt" \
+      || log "WARNING: systemd-tmpfiles failed for ${root_mnt}/var/log/journal"
+  else
+    mkdir -p "${root_mnt}/var/log/journal" || return 0
+    chmod 2755 "${root_mnt}/var/log/journal" || true
+    log "WARNING: systemd-tmpfiles not on host; created journal dir with default mode only."
+  fi
+
+  if [[ -f "${root_mnt}/etc/systemd/journald.conf" ]] \
+    && grep -qE '^[[:space:]]*Storage=persistent[[:space:]]*$' "${root_mnt}/etc/systemd/journald.conf"; then
+    return 0
+  fi
+
+  mkdir -p "${root_mnt}/etc/systemd/journald.conf.d"
+  cat > "$journald_dropin" <<'EOF'
+[Journal]
+Storage=persistent
+EOF
 }
 
 configure_nvme_packages_and_services() {
@@ -2990,6 +3025,7 @@ main() {
   ensure_user_exists_root "$HB_ROOT_MNT" "$username" "$password"
 
   configure_nvme_packages_and_services "$HB_ROOT_MNT" "$locale"
+  configure_persistent_journal_root "$HB_ROOT_MNT"
   install_dserv_stack_root "$HB_ROOT_MNT"
   sync_trial_ingest_secret_to_nvme_root "$HB_ROOT_MNT"
   configure_trial_ingest_pre_remoteservers_root "$HB_ROOT_MNT"
