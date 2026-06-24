@@ -2851,12 +2851,20 @@ class ProvisioningWizard(tk.Tk):
         return "After reboot, the newly provisioned device should appear on that page soon."
 
     def _show_provision_complete_dialog(self, parent):
-        dialog = tk.Toplevel(self)
-        dialog.title("Provisioning complete")
-        dialog.configure(bg=BG)
+        """Completion / reboot screen drawn inside the log window (no separate Toplevel).
+
+        Avoids WM/compositor behavior where the first tap only activates a new window and
+        does not deliver Button events to widgets until the second tap.
+        """
+        overlay = tk.Frame(parent, bg=BG)
+        overlay.place(x=0, y=0, relwidth=1, relheight=1)
+        overlay.lift()
+
+        shell = tk.Frame(overlay, bg=BG)
+        shell.place(relx=0.5, rely=0.42, anchor="center")
 
         tk.Label(
-            dialog,
+            shell,
             text="Provisioning complete",
             bg=BG,
             fg=SUCCESS,
@@ -2872,7 +2880,7 @@ class ProvisioningWizard(tk.Tk):
             "That is expected for this setup."
         )
         tk.Label(
-            dialog,
+            shell,
             text=message,
             bg=BG,
             fg=FG,
@@ -2881,28 +2889,41 @@ class ProvisioningWizard(tk.Tk):
             wraplength=780,
         ).pack(anchor="w", fill="x", padx=35, pady=(0, 25))
 
-        footer = tk.Frame(dialog, bg=BG)
+        footer = tk.Frame(shell, bg=BG)
         footer.pack(fill="x", padx=35, pady=(0, 30))
         reboot_button = self._make_button(
             footer,
             "Reboot",
-            lambda: self._request_reboot_from_completion(dialog, reboot_button),
+            lambda: self._request_reboot_from_completion(shell, reboot_button),
             primary=True,
+            pointer_trace_tag="reboot",
         )
         reboot_button.config(padx=60, pady=24)
         reboot_button.pack(side="right")
 
-        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
-        self._finalize_modal(
-            dialog,
-            focus_widget=reboot_button,
-            parent=parent,
-            geometry="860x430+210+120",
-        )
+        overlay.update_idletasks()
+        try:
+            parent.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            parent.focus_force()
+        except tk.TclError:
+            pass
 
-    def _request_reboot_from_completion(self, dialog, reboot_button):
+        def focus_reboot():
+            try:
+                reboot_button.configure(takefocus=1)
+                reboot_button.focus_set()
+            except tk.TclError:
+                pass
+
+        parent.after_idle(focus_reboot)
+        parent.after(MODAL_FOCUS_RETRY_MS, focus_reboot)
+
+    def _request_reboot_from_completion(self, shell, reboot_button):
         reboot_button.config(state="disabled", text="Rebooting...")
-        dialog.update_idletasks()
+        shell.update_idletasks()
         try:
             Path(REBOOT_REQUEST_FILE).write_text(
                 f"reboot requested by GUI pid {os.getpid()} at {time.time()}\n",
@@ -2918,7 +2939,7 @@ class ProvisioningWizard(tk.Tk):
             return
 
         tk.Label(
-            dialog,
+            shell,
             text="Reboot requested. The device should restart momentarily.",
             bg=BG,
             fg=SUCCESS,
