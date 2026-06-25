@@ -1520,6 +1520,8 @@ class ProvisioningWizard(tk.Tk):
         self._configure_wifi_hidden_pick_checkbox_style()
 
         self._configure_window_size()
+        self._disable_screen_blanking()
+        self.after(60000, self._keep_display_awake)
 
         self.output_path = output_path
         self._self_update_retry_needed = False
@@ -1608,6 +1610,40 @@ class ProvisioningWizard(tk.Tk):
         self.geometry(f"{width}x{height}+{margin_left}+{margin_top}")
         self.minsize(min(760, width), min(420, height))
         self.maxsize(width, height)
+
+    def _disable_screen_blanking(self):
+        """Best-effort: stop X11 screen blanking/DPMS so the panel never sleeps
+        during the long provisioning wait. Otherwise the first tap on Reboot only
+        wakes the display instead of registering a click."""
+        if not shutil.which("xset"):
+            return
+        for args in (["s", "off"], ["s", "noblank"], ["-dpms"]):
+            try:
+                subprocess.run(
+                    ["xset", *args],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+    def _keep_display_awake(self):
+        if shutil.which("xset"):
+            try:
+                subprocess.run(
+                    ["xset", "s", "reset"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        self.after(60000, self._keep_display_awake)
 
     def _configure_wifi_hidden_pick_checkbox_style(self):
         """ttk backup style (clam + indicator colors); SSID pick uses canvas toggle for clarity."""
@@ -2856,6 +2892,7 @@ class ProvisioningWizard(tk.Tk):
         Avoids WM/compositor behavior where the first tap only activates a new window and
         does not deliver Button events to widgets until the second tap.
         """
+        self._disable_screen_blanking()
         overlay = tk.Frame(parent, bg=BG)
         overlay.place(x=0, y=0, relwidth=1, relheight=1)
         overlay.lift()

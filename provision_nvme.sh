@@ -34,6 +34,10 @@ HB_REBOOT_REQUEST_FILE="${HB_PROVISION_REBOOT_REQUEST_FILE:-/tmp/hb_provision_re
 HB_PROVISION_LOCK_FILE="${HB_PROVISION_LOCK_FILE:-/tmp/hb_provision_nvme.lock}"
 HB_PROVISION_COMPLETE_MARKER="Provisioning complete. Waiting for GUI reboot request."
 
+# dserv stack bootstrap: verify after install; retry when registry release is mid-build.
+HB_DSERV_BOOTSTRAP_MAX_ATTEMPTS="${HB_DSERV_BOOTSTRAP_MAX_ATTEMPTS:-3}"
+HB_DSERV_BOOTSTRAP_RETRY_WAIT_SEC="${HB_DSERV_BOOTSTRAP_RETRY_WAIT_SEC:-180}"
+
 # Persistent swap on host rootfs (eMMC when booting from eMMC). Adds /etc/fstab entry. HB_EMMC_SWAP_MB=0 disables.
 HB_EMMC_SWAP_MB="${HB_EMMC_SWAP_MB:-2048}"
 HB_EMMC_SWAP_PATH="${HB_EMMC_SWAP_PATH:-/var/swap/hb_provision.swap}"
@@ -2690,11 +2694,15 @@ configure_nvme_packages_and_services() {
 enable_systemd_service_root() {
   local root_mnt="$1"
   local rel_path="$2"
+  local die_on_missing="${3:-0}"
   local source="${root_mnt}${rel_path}"
   local service_name
   service_name="$(basename "$rel_path")"
 
   if [[ ! -f "$source" ]]; then
+    if [[ "$die_on_missing" == "1" ]]; then
+      die "Missing required service file in NVMe rootfs: $rel_path"
+    fi
     log "WARNING: Missing service file in NVMe rootfs: $rel_path"
     return 0
   fi
@@ -2782,24 +2790,239 @@ configure_dserv_local_tcl_root() {
   fi
 }
 
+dserv_stack_chroot_env() {
+  DSERV_STACK_CHROOT_ENV=(/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive DSERV_BOOTSTRAP_FORCE=1)
+}
+
+dserv_stack_dpkg_status() {
+  local root_mnt="$1"
+  local pkg="$2"
+  chroot "$root_mnt" "${DSERV_STACK_CHROOT_ENV[@]}" dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true
+}
+
+dserv_stack_dpkg_architecture() {
+  local root_mnt="$1"
+  local pkg="$2"
+  chroot "$root_mnt" "${DSERV_STACK_CHROOT_ENV[@]}" dpkg-query -W -f='${Architecture}' "$pkg" 2>/dev/null || true
+}
+
+dserv_stack_system_architecture() {
+  local root_mnt="$1"
+  chroot "$root_mnt" "${DSERV_STACK_CHROOT_ENV[@]}" dpkg --print-architecture 2>/dev/null || true
+}
+
+verify_dserv_stack_component_root() {
+  local root_mnt="$1"
+  local component="$2"
+  local reason=""
+
+  case "$component" in
+    dlsh)
+      if [[ ! -s "${root_mnt}/usr/local/dlsh/dlsh.zip" ]]; then
+        reason="dlsh.zip missing or empty"
+      elif [[ ! -s "${root_mnt}/usr/local/dlsh/VERSION" ]]; then
+        reason="VERSION missing or empty"
+      fi
+      ;;
+    dserv)
+      if [[ ! -f "${root_mnt}/usr/local/dserv/systemd/dserv.service" ]]; then
+        reason="systemd/dserv.service missing"
+      elif [[ "$(dserv_stack_dpkg_status "$root_mnt" dserv)" != "install ok installed" ]]; then
+        reason="dpkg package dserv not installed"
+      else
+        local pkg_arch sys_arch
+        pkg_arch="$(dserv_stack_dpkg_architecture "$root_mnt" dserv)"
+        sys_arch="$(dserv_stack_system_architecture "$root_mnt")"
+        if [[ -z "$pkg_arch" || -z "$sys_arch" ]]; then
+          reason="could not determine package or system architecture"
+        elif [[ "$pkg_arch" != "$sys_arch" ]]; then
+          reason="package architecture ${pkg_arch} does not match system ${sys_arch}"
+        fi
+      fi
+      ;;
+    stim2)
+      if [[ ! -f "${root_mnt}/usr/local/stim2/systemd/stim2.service" ]]; then
+        reason="systemd/stim2.service missing"
+      elif [[ "$(dserv_stack_dpkg_status "$root_mnt" stim2)" != "install ok installed" ]]; then
+        reason="dpkg package stim2 not installed"
+      else
+        local pkg_arch sys_arch
+        pkg_arch="$(dserv_stack_dpkg_architecture "$root_mnt" stim2)"
+        sys_arch="$(dserv_stack_system_architecture "$root_mnt")"
+        if [[ -z "$pkg_arch" || -z "$sys_arch" ]]; then
+          reason="could not determine package or system architecture"
+        elif [[ "$pkg_arch" != "$sys_arch" ]]; then
+          reason="package architecture ${pkg_arch} does not match system ${sys_arch}"
+        fi
+      fi
+      ;;
+    dserv-agent)
+      if [[ ! -x "${root_mnt}/usr/local/bin/dserv-agent" ]]; then
+        reason="/usr/local/bin/dserv-agent missing or not executable"
+      fi
+      ;;
+    *)
+      reason="unknown component ${component}"
+      ;;
+  esac
+
+  if [[ -n "$reason" ]]; then
+    log "dserv stack verify: ${component}: ${reason}"
+    return 1
+  fi
+  return 0
+}
+
+verify_dserv_stack_root() {
+  local root_mnt="$1"
+  local component
+  local -a failed=()
+
+  for component in dlsh dserv stim2 dserv-agent; do
+    if ! verify_dserv_stack_component_root "$root_mnt" "$component"; then
+      failed+=("$component")
+    fi
+  done
+
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    printf '%s\n' "${failed[@]}"
+    return 1
+  fi
+  return 0
+}
+
+archive_dserv_bootstrap_log_root() {
+  local root_mnt="$1"
+  local attempt="$2"
+  local newest dest_dir timestamp dest
+  local -a logs=()
+
+  shopt -s nullglob
+  logs=("${root_mnt}"/tmp/dserv-bootstrap-*.log)
+  shopt -u nullglob
+
+  if [[ ${#logs[@]} -eq 0 ]]; then
+    log "WARNING: No dserv bootstrap log found in NVMe rootfs /tmp for attempt ${attempt}."
+    return 0
+  fi
+
+  newest="$(ls -t "${logs[@]}" 2>/dev/null | head -1)"
+  if [[ -z "$newest" || ! -f "$newest" ]]; then
+    log "WARNING: Could not select dserv bootstrap log for attempt ${attempt}."
+    return 0
+  fi
+
+  dest_dir="${root_mnt}/var/log/provision"
+  timestamp="$(date +%Y%m%d_%H%M%S)"
+  dest="${dest_dir}/dserv-bootstrap_attempt${attempt}_${timestamp}.log"
+  mkdir -p "$dest_dir"
+  if cp -- "$newest" "$dest"; then
+    log "Archived dserv bootstrap log (attempt ${attempt}) to ${dest}."
+  else
+    log "WARNING: Failed to archive dserv bootstrap log from ${newest}."
+  fi
+}
+
+run_dserv_bootstrap_chroot() {
+  local root_mnt="$1"
+  local registry_url="$2"
+  local workgroup="$3"
+  local attempt="$4"
+
+  if ! chroot "$root_mnt" "${DSERV_STACK_CHROOT_ENV[@]}" /bin/bash -c \
+    'curl -sSL "$1" | bash -s -- --workgroup "$2"' \
+    _ "${registry_url}/setup" "$workgroup"; then
+    log "WARNING: dserv bootstrap script exited non-zero on attempt ${attempt} (verification will follow)."
+  fi
+  archive_dserv_bootstrap_log_root "$root_mnt" "$attempt"
+}
+
+wait_dserv_bootstrap_retry() {
+  local attempt="$1"
+  local wait_sec="$2"
+  local failed_list="$3"
+  local elapsed
+
+  log "dserv stack install incomplete after attempt ${attempt} (failed: ${failed_list})."
+  log "Waiting ${wait_sec} seconds before retry in case a new system release is still building..."
+  elapsed=0
+  while [[ "$elapsed" -lt "$wait_sec" ]]; do
+    sleep 30
+    elapsed=$((elapsed + 30))
+    if [[ "$elapsed" -lt "$wait_sec" ]]; then
+      log "dserv stack retry wait: ${elapsed}/${wait_sec} seconds elapsed..."
+    fi
+  done
+}
+
+log_dserv_stack_abort_banner() {
+  local -a failed_components=("$@")
+  local failed_text max_attempts="${HB_DSERV_BOOTSTRAP_MAX_ATTEMPTS}"
+  local IFS=', '
+  failed_text="${failed_components[*]}"
+
+  echo ""
+  log "╔══════════════════════════════════════════════════════════╗"
+  log "║  A new system is currently being built!                  ║"
+  log "║                                                          ║"
+  log "║  Required software could not be installed:               ║"
+  log "║    ${failed_text}                                        ║"
+  log "║  (after ${max_attempts} attempts).                       ║"
+  log "║                                                          ║"
+  log "║  Please reboot and run provisioning again in a few       ║"
+  log "║  minutes.                                                ║"
+  log "║                                                          ║"
+  log "║  Bootstrap logs: /var/log/provision/dserv-bootstrap_*    ║"
+  log "╚══════════════════════════════════════════════════════════╝"
+  echo ""
+}
+
 install_dserv_stack_root() {
   local root_mnt="$1"
   local registry_url="${DEFAULT_MESH_HOST:-https://dserv.net}"
   local workgroup="${DEFAULT_MESH_WORKGROUP:-brown-sheinberg}"
   local bootstrap_workgroup="${workgroup//./-}"
+  local max_attempts="${HB_DSERV_BOOTSTRAP_MAX_ATTEMPTS}"
+  local wait_sec="${HB_DSERV_BOOTSTRAP_RETRY_WAIT_SEC}"
+  local attempt failed_line
+  local -a failed_components=()
+
   registry_url="${registry_url%/}"
 
   log "Installing dserv stack from ${registry_url}/setup for workgroup '${bootstrap_workgroup}'..."
 
   mount_chroot_env "$root_mnt"
   trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
-  local chroot_env=(/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive DSERV_BOOTSTRAP_FORCE=1)
-  chroot "$root_mnt" "${chroot_env[@]}" /bin/bash -c \
-    'curl -sSL "$1" | bash -s -- --workgroup "$2"' \
-    _ "${registry_url}/setup" "$bootstrap_workgroup" \
-    || die "Failed to install dserv stack in NVMe rootfs."
+  dserv_stack_chroot_env
+
+  for (( attempt=1; attempt<=max_attempts; attempt++ )); do
+    log "dserv stack bootstrap attempt ${attempt}/${max_attempts}..."
+    run_dserv_bootstrap_chroot "$root_mnt" "$registry_url" "$bootstrap_workgroup" "$attempt"
+
+    failed_components=()
+    while IFS= read -r failed_line; do
+      [[ -n "$failed_line" ]] && failed_components+=("$failed_line")
+    done < <(verify_dserv_stack_root "$root_mnt" || true)
+
+    if [[ ${#failed_components[@]} -eq 0 ]]; then
+      log "dserv stack verification passed (attempt ${attempt})."
+      break
+    fi
+
+    log "dserv stack verification failed (attempt ${attempt}): ${failed_components[*]}"
+
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      wait_dserv_bootstrap_retry "$attempt" "$wait_sec" "${failed_components[*]}"
+    fi
+  done
+
   unmount_chroot_env "$root_mnt"
   trap - RETURN
+
+  if [[ ${#failed_components[@]} -gt 0 ]]; then
+    log_dserv_stack_abort_banner "${failed_components[@]}"
+    die "dserv stack installation failed after ${max_attempts} attempts."
+  fi
 
   configure_dserv_local_tcl_root "$root_mnt"
 }
@@ -3033,8 +3256,8 @@ main() {
   install_browser_editor_root "$HB_ROOT_MNT" "$username" "$password" "$hostname"
   write_monitor_tcl_root "$HB_ROOT_MNT"
 
-  enable_systemd_service_root "$HB_ROOT_MNT" "/usr/local/stim2/systemd/stim2.service"
-  enable_systemd_service_root "$HB_ROOT_MNT" "/usr/local/dserv/systemd/dserv.service"
+  enable_systemd_service_root "$HB_ROOT_MNT" "/usr/local/stim2/systemd/stim2.service" 1
+  enable_systemd_service_root "$HB_ROOT_MNT" "/usr/local/dserv/systemd/dserv.service" 1
   enable_systemd_service_root "$HB_ROOT_MNT" "/usr/local/dserv/systemd/dserv-agent.service"
   write_stim2_service_override_root "$HB_ROOT_MNT"
   write_dserv_agent_override_root "$HB_ROOT_MNT"
