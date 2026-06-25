@@ -2889,8 +2889,8 @@ class ProvisioningWizard(tk.Tk):
     def _show_provision_complete_dialog(self, parent):
         """Completion / reboot screen drawn inside the log window (no separate Toplevel).
 
-        Avoids WM/compositor behavior where the first tap only activates a new window and
-        does not deliver Button events to widgets until the second tap.
+        Uses global grab + topmost on the log window (same as _finalize_modal) so the WM
+        does not absorb the first tap as a window-activation click.
         """
         self._disable_screen_blanking()
         overlay = tk.Frame(parent, bg=BG)
@@ -2939,28 +2939,119 @@ class ProvisioningWizard(tk.Tk):
         reboot_button.pack(side="right")
 
         overlay.update_idletasks()
+        dbg = bool(os.environ.get("HB_DEBUG_MODAL_EVENTS"))
+
         try:
-            parent.grab_set()
+            parent.wait_visibility()
         except tk.TclError:
             pass
+
         try:
+            parent.lift()
+        except tk.TclError:
+            pass
+
+        # Focus before grab: some WMs behave better when keyboard focus is established first.
+        try:
+            parent.focus_force()
+            parent.update()
+            parent.focus_force()
+        except tk.TclError:
+            pass
+
+        grab_mode = "-"
+        try:
+            grab_global = getattr(parent, "grab_set_global", None)
+            if callable(grab_global):
+                try:
+                    grab_global()
+                    grab_mode = "g"
+                except tk.TclError:
+                    parent.grab_set()
+                    grab_mode = "l"
+            else:
+                parent.grab_set()
+                grab_mode = "l"
+        except tk.TclError:
+            grab_mode = "!"
+        if dbg:
+            self._debug_modal_event(f"complete grab={grab_mode}")
+
+        # Keep topmost so the WM does not leave the surface needing a separate activation click.
+        try:
+            parent.attributes("-topmost", True)
+            parent.update_idletasks()
+            parent.update()
+        except tk.TclError:
+            pass
+        if dbg:
+            self._debug_modal_event("complete topmost on")
+
+        try:
+            parent.focus_force()
+            parent.update()
             parent.focus_force()
         except tk.TclError:
             pass
 
         def focus_reboot():
             try:
+                if not reboot_button.winfo_exists():
+                    return
                 reboot_button.configure(takefocus=1)
                 reboot_button.focus_set()
+                if dbg:
+                    try:
+                        fg = parent.focus_get()
+                    except tk.TclError:
+                        fg = None
+                    self._debug_modal_event(
+                        f"complete defbtn fg={self._widget_dbg(fg)} "
+                        f"btn={self._widget_dbg(reboot_button)}"
+                    )
             except tk.TclError:
                 pass
 
         parent.after_idle(focus_reboot)
-        parent.after(MODAL_FOCUS_RETRY_MS, focus_reboot)
+
+        def delayed_focus_retry():
+            try:
+                if not parent.winfo_exists():
+                    return
+                parent.lift()
+                parent.focus_force()
+                parent.update()
+                if reboot_button.winfo_exists():
+                    reboot_button.configure(takefocus=1)
+                    reboot_button.focus_set()
+                if dbg:
+                    try:
+                        fg = parent.focus_get()
+                    except tk.TclError:
+                        fg = None
+                    self._debug_modal_event(
+                        f"complete retry fg={self._widget_dbg(fg)} "
+                        f"btn={self._widget_dbg(reboot_button)}"
+                    )
+            except tk.TclError:
+                pass
+
+        parent.after(MODAL_FOCUS_RETRY_MS, delayed_focus_retry)
+
+    def _release_completion_input_lock(self, parent):
+        try:
+            parent.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            parent.attributes("-topmost", False)
+        except tk.TclError:
+            pass
 
     def _request_reboot_from_completion(self, shell, reboot_button):
         reboot_button.config(state="disabled", text="Rebooting...")
         shell.update_idletasks()
+        parent = reboot_button.winfo_toplevel()
         try:
             Path(REBOOT_REQUEST_FILE).write_text(
                 f"reboot requested by GUI pid {os.getpid()} at {time.time()}\n",
@@ -2968,6 +3059,7 @@ class ProvisioningWizard(tk.Tk):
             )
         except OSError as exc:
             reboot_button.config(state="normal", text="Reboot")
+            self._release_completion_input_lock(parent)
             self._show_styled_error_modal(
                 "Reboot failed",
                 "Could not request reboot from the provisioning backend.\n\n"
