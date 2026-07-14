@@ -2875,8 +2875,20 @@ configure_dserv_local_tcl_root() {
   if [[ -f "${root_mnt}/usr/local/dserv/local/post-pins.tcl.EXAMPLE" ]]; then
     cp -n "${root_mnt}/usr/local/dserv/local/post-pins.tcl.EXAMPLE" "${root_mnt}/usr/local/dserv/local/post-pins.tcl" || true
   fi
+  local sound_target="${root_mnt}/usr/local/dserv/local/sound.tcl"
   if [[ -f "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" ]]; then
-    cp -n "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" "${root_mnt}/usr/local/dserv/local/sound.tcl" || true
+    cp -n "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" "$sound_target" || true
+  fi
+  if [[ -f "$sound_target" ]]; then
+    if ! grep -qE '^[[:space:]]*sound::init_fluidsynth[[:space:]]' "$sound_target" 2>/dev/null; then
+      if [[ -s "$sound_target" ]] && [[ "$(tail -c1 "$sound_target" 2>/dev/null)" != $'\n' ]]; then
+        printf '\n' >>"$sound_target" || true
+      fi
+      cat >>"$sound_target" <<'EOF'
+sound::init_fluidsynth /usr/share/sounds/sf2/default-GM.sf2 plughw:0,0
+EOF
+      log "Appended FluidSynth init to sound.tcl"
+    fi
   fi
   if [[ -f "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" ]]; then
     local mesh_target="${root_mnt}/usr/local/dserv/local/mesh.tcl"

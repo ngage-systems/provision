@@ -739,6 +739,21 @@ def detect_wifi_adapters():
     }
 
 
+def builtin_wifi_disabled_in_boot_config():
+    """True when the running system's boot config already disables built-in WiFi."""
+    for path in ("/boot/firmware/config.txt", "/boot/config.txt"):
+        cfg = Path(path)
+        if not cfg.is_file():
+            continue
+        try:
+            text = cfg.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if re.search(r"^\s*dtoverlay=disable-wifi\s*$", text, re.MULTILINE):
+            return True
+    return False
+
+
 def detect_touchscreen(lsusb_output):
     for line in lsusb_output.splitlines():
         if re.search(r"\bID\s+(0eef:c002|222a:0001)\b", line, re.IGNORECASE):
@@ -3920,6 +3935,9 @@ class ProvisioningWizard(tk.Tk):
             if name == "_step_locale" and self._should_skip_locale_step():
                 index += 1
                 continue
+            if name == "_step_usb_wifi" and self._should_skip_usb_wifi_step():
+                index += 1
+                continue
             break
         if index >= len(self.steps):
             return len(self.steps) - 1
@@ -4082,9 +4100,21 @@ class ProvisioningWizard(tk.Tk):
 
     def _should_skip_usb_wifi_step(self):
         detection = self.answers.get("usb_wifi_detection")
-        if isinstance(detection, dict) and "detected" in detection:
-            return not bool(detection.get("detected"))
-        return not detect_wifi_adapters()["detected"]
+        if not isinstance(detection, dict) or "detected" not in detection:
+            detection = detect_wifi_adapters()
+            self.answers["usb_wifi_detection"] = detection
+
+        if not detection.get("detected"):
+            return True
+
+        if builtin_wifi_disabled_in_boot_config():
+            if not self.answers.get("disable_builtin_wifi"):
+                self.answers["disable_builtin_wifi"] = True
+                self.answers["usb_wifi_inherited_from_fallback"] = True
+                self._suppress_builtin_wifi_for_session()
+            return True
+
+        return False
 
     def _suppress_builtin_wifi_for_session(self):
         detection = self.answers.get("usb_wifi_detection") or detect_wifi_adapters()
@@ -4111,6 +4141,8 @@ class ProvisioningWizard(tk.Tk):
             return "N/A (no USB adapter)"
         if self.answers.get("disable_builtin_wifi"):
             detail = detection.get("detail") or "USB adapter"
+            if self.answers.get("usb_wifi_inherited_from_fallback"):
+                return f"Disabled (using {detail}, from fallback image)"
             return f"Disabled (using {detail})"
         return "Enabled (both adapters active)"
 
