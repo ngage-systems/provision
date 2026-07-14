@@ -66,9 +66,12 @@ print_accessory_result() {
   local label="$1"
   local detail="$2"
   local missing_detail="$3"
+  local status="${4:-not detected}"
 
   if [[ -n "$detail" ]]; then
     printf '  %-15s detected (%s)\n' "${label}:" "$detail" >&2
+  elif [[ "$status" == "unable to verify" ]]; then
+    printf '  %-15s unable to verify (%s)\n' "${label}:" "$missing_detail" >&2
   else
     printf '  %-15s not detected (%s)\n' "${label}:" "$missing_detail" >&2
   fi
@@ -78,17 +81,22 @@ check_accessories_and_acknowledge() {
   local usb_output=""
   local touchscreen="" juicer="" power_monitor="" camera=""
   local touchscreen_missing="USB touchscreen controller 0eef:c002 or 222a:0001 not found"
+  local touchscreen_status="not detected"
   local juicer_missing="USB device containing 'juicer' not found"
+  local juicer_status="not detected"
   local power_monitor_missing="/dev/serial/by-id/usb-Homebase_power_monitor_*-if00 not found"
-  local camera_missing="No cameras reported by rpicam-hello --list-cameras"
+  local camera_missing="no cameras reported; host may lack imx708 overlay — fallback OS configures imx708"
+  local camera_status="not detected"
 
   if have_cmd lsusb; then
     usb_output="$(lsusb 2>/dev/null || true)"
     touchscreen="$(detect_touchscreen "$usb_output" || true)"
     juicer="$(detect_juicer "$usb_output" || true)"
   else
-    touchscreen_missing="Missing command: lsusb"
-    juicer_missing="Missing command: lsusb"
+    touchscreen_missing="lsusb not available; USB accessory checks skipped"
+    touchscreen_status="unable to verify"
+    juicer_missing="lsusb not available; USB accessory checks skipped"
+    juicer_status="unable to verify"
   fi
 
   power_monitor="$(detect_power_monitor || true)"
@@ -97,18 +105,21 @@ check_accessories_and_acknowledge() {
     local camera_output
     camera_output="$(rpicam-hello --list-cameras 2>&1 || true)"
     camera="$(detect_camera "$camera_output" || true)"
-    if [[ -z "$camera" && -n "$camera_output" ]]; then
-      camera_missing="$(echo "$camera_output" | sed -n '1p')"
+    if [[ -z "$camera" ]]; then
+      if [[ -n "$camera_output" ]]; then
+        camera_missing="$(echo "$camera_output" | sed -n '1p'); host may lack imx708 overlay — fallback OS configures imx708"
+      fi
     fi
   else
-    camera_missing="Missing command: rpicam-hello"
+    camera_missing="rpicam-hello not available; camera will be configured on fallback OS"
+    camera_status="unable to verify"
   fi
 
   printf '\nAccessory checks:\n' >&2
-  print_accessory_result "Touchscreen" "$touchscreen" "$touchscreen_missing"
-  print_accessory_result "Juicer" "$juicer" "$juicer_missing"
+  print_accessory_result "Touchscreen" "$touchscreen" "$touchscreen_missing" "$touchscreen_status"
+  print_accessory_result "Juicer" "$juicer" "$juicer_missing" "$juicer_status"
   print_accessory_result "Power monitor" "$power_monitor" "$power_monitor_missing"
-  print_accessory_result "Camera" "$camera" "$camera_missing"
+  print_accessory_result "Camera" "$camera" "$camera_missing" "$camera_status"
   printf '\n' >&2
   read -r -p "Press Enter to continue after reviewing accessory checks." _
 }
@@ -732,6 +743,37 @@ confirm_erase_device() {
   [[ "$answer" == "ERASE" ]] || die "User did not confirm ERASE."
 }
 
+install_accessory_check_packages() {
+  local packages=()
+
+  if ! have_cmd lsusb; then
+    packages+=(usbutils)
+  fi
+  if ! have_cmd rpicam-hello; then
+    packages+=(rpicam-apps-lite)
+  fi
+
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  if ! have_cmd apt-get; then
+    log "WARNING: apt-get not found; skipping accessory-check package install (${packages[*]})."
+    return 0
+  fi
+
+  log "Installing accessory-check packages: ${packages[*]}"
+  export DEBIAN_FRONTEND=noninteractive
+  if ! apt-get update; then
+    log "WARNING: apt-get update failed; accessory checks may be unavailable."
+    return 0
+  fi
+  if ! apt-get install -y --no-install-recommends "${packages[@]}"; then
+    log "WARNING: Failed to install accessory-check packages (${packages[*]}); some checks may be unavailable."
+    return 0
+  fi
+}
+
 install_packages() {
   need_cmd apt-get
   log "Installing required packages..."
@@ -1231,6 +1273,7 @@ main() {
   fi
   log "Internet connectivity verified."
 
+  install_accessory_check_packages
   check_accessories_and_acknowledge
 
   local root_src root_dev
