@@ -297,11 +297,106 @@ nmcli_connected() {
   nmcli -t -f STATE g 2>/dev/null | grep -q '^connected$'
 }
 
+# Wi-Fi adapter detection — keep in sync with provision_nvme.sh / provision_nvme_gui.py
+classify_wifi_iface_bus() {
+  local iface="$1"
+  local iface_path="/sys/class/net/${iface}"
+  [[ -d "${iface_path}/wireless" ]] || return 1
+
+  local driver="?" devpath=""
+  if [[ -e "${iface_path}/device/driver" ]]; then
+    driver="$(basename "$(readlink -f "${iface_path}/device/driver" 2>/dev/null)" 2>/dev/null || echo "?")"
+  fi
+  devpath="$(readlink -f "${iface_path}/device" 2>/dev/null || echo "")"
+
+  if [[ "$devpath" == *"/usb"* ]]; then
+    echo "usb"
+  elif [[ "$driver" == "brcmfmac" ]]; then
+    echo "builtin"
+  else
+    echo "other"
+  fi
+}
+
+detect_usb_wifi_iface() {
+  local iface bus
+  for iface_path in /sys/class/net/*; do
+    iface="$(basename "$iface_path")"
+    bus="$(classify_wifi_iface_bus "$iface" 2>/dev/null || true)"
+    if [[ "$bus" == "usb" ]]; then
+      echo "$iface"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_usb_wifi() {
+  detect_usb_wifi_iface >/dev/null 2>&1
+}
+
+usb_wifi_detection_detail() {
+  local iface driver
+  iface="$(detect_usb_wifi_iface 2>/dev/null || true)"
+  [[ -n "$iface" ]] || return 1
+  driver="$(basename "$(readlink -f "/sys/class/net/${iface}/device/driver" 2>/dev/null)" 2>/dev/null || echo "?")"
+  echo "${iface} (${driver})"
+}
+
+suppress_builtin_wifi_for_session() {
+  local iface bus
+  for iface_path in /sys/class/net/*; do
+    iface="$(basename "$iface_path")"
+    bus="$(classify_wifi_iface_bus "$iface" 2>/dev/null || true)"
+    if [[ "$bus" == "builtin" ]] && have_cmd nmcli; then
+      nmcli dev set "$iface" managed no >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+prompt_disable_builtin_wifi() {
+  local detail choice
+  detect_usb_wifi || return 0
+  detail="$(usb_wifi_detection_detail || echo "USB WiFi")"
+  echo "USB WiFi detected: ${detail}." >&2
+  echo -n "Disable built-in WiFi adapter and use the USB adapter? [y/N]: " >&2
+  read -r choice
+  case "${choice,,}" in
+    y|yes) disable_builtin_wifi="true" ;;
+    *) disable_builtin_wifi="false" ;;
+  esac
+  if [[ "$disable_builtin_wifi" == "true" ]]; then
+    export HB_PREFER_USB_WIFI=1
+    suppress_builtin_wifi_for_session
+  fi
+}
+
 wifi_iface() {
   # Returns the first connected wifi interface (e.g. wlan0), or empty.
   have_cmd nmcli || { echo ""; return 0; }
   nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null \
     | awk -F: '$2=="wifi" && $3=="connected"{print $1; exit}'
+}
+
+preferred_wifi_iface() {
+  local iface
+  if [[ "${HB_PREFER_USB_WIFI:-}" == "1" || "${disable_builtin_wifi:-}" == "true" ]]; then
+    iface="$(detect_usb_wifi_iface 2>/dev/null || true)"
+    if [[ -n "$iface" ]]; then
+      if have_cmd nmcli; then
+        local connected
+        connected="$(nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null \
+          | awk -F: -v u="$iface" '$1==u && $2=="wifi" && $3=="connected"{print $1; exit}')"
+        if [[ -n "$connected" ]]; then
+          echo "$connected"
+          return 0
+        fi
+      fi
+      echo "$iface"
+      return 0
+    fi
+  fi
+  wifi_iface
 }
 
 connected_wifi_ssid() {
@@ -350,7 +445,7 @@ connect_wifi_current() {
   nmcli dev wifi rescan >/dev/null 2>&1 || true
 
   local iface
-  iface="$(wifi_iface)"
+  iface="$(preferred_wifi_iface)"
   if [[ -z "$iface" ]]; then
     iface="$(nmcli -t -f DEVICE,TYPE dev status 2>/dev/null | awk -F: '$2=="wifi"{print $1; exit}')"
   fi
@@ -950,6 +1045,7 @@ write_fallback_config() {
   local defaults_group="$4"
   local rotate_choice="$5"
   local trial_ingest_secret="$6"
+  local disable_builtin_wifi="${7:-false}"
 
   log "Configuring fallback OS (user/autostart/sudo)..."
 
@@ -996,6 +1092,14 @@ write_fallback_config() {
   if [[ -f "$cfg" ]]; then
     if ! grep -qE '^\s*dtparam=ant2\s*$' "$cfg"; then
       echo "dtparam=ant2" >> "$cfg"
+    fi
+  fi
+
+  if [[ "$disable_builtin_wifi" == "true" ]]; then
+    if [[ -f "$cfg" ]]; then
+      if ! grep -qE '^\s*dtoverlay=disable-wifi\s*$' "$cfg"; then
+        echo "dtoverlay=disable-wifi" >> "$cfg"
+      fi
     fi
   fi
 
@@ -1087,10 +1191,12 @@ EOF
     fi
   fi
 
-  mkdir -p "${root_mnt}/etc/modprobe.d"
-  cat > "${root_mnt}/etc/modprobe.d/brcmfmac.conf" <<'EOF'
+  if [[ "$disable_builtin_wifi" != "true" ]]; then
+    mkdir -p "${root_mnt}/etc/modprobe.d"
+    cat > "${root_mnt}/etc/modprobe.d/brcmfmac.conf" <<'EOF'
 options brcmfmac roamoff=1
 EOF
+  fi
 
   log "Writing trial ingest secret on fallback root..."
   write_trial_ingest_secret "$trial_ingest_secret" "$root_mnt"
@@ -1104,6 +1210,9 @@ main() {
   need_cmd sed
 
   check_bookworm_or_later
+
+  disable_builtin_wifi="false"
+  prompt_disable_builtin_wifi
 
   # Ensure we have internet for downloads.
   local wifi_ssid="" wifi_pass=""
@@ -1174,7 +1283,7 @@ main() {
   local trial_ingest_secret
   trial_ingest_secret="$(openssl rand -hex 8)"
 
-  write_fallback_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$hostname" "$defaults_group" "$rotate_choice" "$trial_ingest_secret"
+  write_fallback_config "$HB_BOOT_MNT" "$HB_ROOT_MNT" "$hostname" "$defaults_group" "$rotate_choice" "$trial_ingest_secret" "$disable_builtin_wifi"
 
   local mesh_workgroup cloud_registry_url registered=0
   mesh_workgroup="$(mesh_workgroup_for_defaults_group "$defaults_group" "$DEFAULTS_FILE")"

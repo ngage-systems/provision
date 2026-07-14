@@ -589,7 +589,15 @@ def wifi_interfaces_from_iw():
     return interfaces
 
 
-def scan_wifi_ssids(wifi_country=""):
+def _wifi_interface_names_for_work(disable_builtin=False):
+    if disable_builtin:
+        detection = detect_wifi_adapters()
+        if detection["usb"]:
+            return [item["name"] for item in detection["usb"]]
+    return wifi_interfaces_from_nmcli() or wifi_interfaces_from_iw()
+
+
+def scan_wifi_ssids(wifi_country="", disable_builtin=False):
     scan_file = Path(WIFI_SCAN_FILE)
     if scan_file.is_file():
         ssids = parse_ssids(scan_file.read_text(encoding="utf-8").splitlines())
@@ -624,7 +632,7 @@ def scan_wifi_ssids(wifi_country=""):
         elif result.stderr.strip():
             diagnostics.append(result.stderr.strip())
 
-    interfaces = wifi_interfaces_from_nmcli() or wifi_interfaces_from_iw()
+    interfaces = _wifi_interface_names_for_work(disable_builtin=disable_builtin)
     for iface in interfaces:
         for cmd in (["sudo", "-n", "iw", "dev", iface, "scan"], ["iw", "dev", iface, "scan"]):
             result = quick_command(cmd, timeout=20)
@@ -668,6 +676,67 @@ def run_command(cmd, timeout=30, env=None):
 
 def accessory_result(detected, detail):
     return {"detected": bool(detected), "detail": detail}
+
+
+def classify_wifi_interface(iface):
+    iface_path = Path(f"/sys/class/net/{iface}")
+    if not (iface_path / "wireless").is_dir():
+        return None
+
+    driver = "?"
+    driver_link = iface_path / "device" / "driver"
+    try:
+        if driver_link.exists():
+            driver = driver_link.resolve().name
+    except OSError:
+        pass
+
+    devpath = ""
+    try:
+        devpath = str((iface_path / "device").resolve())
+    except OSError:
+        pass
+
+    if "/usb" in devpath:
+        bus = "usb"
+    elif driver == "brcmfmac":
+        bus = "builtin"
+    else:
+        bus = "other"
+
+    return {"name": iface, "driver": driver, "bus": bus, "path": devpath}
+
+
+def detect_wifi_adapters():
+    usb = []
+    builtin = []
+    other = []
+    net_dir = Path("/sys/class/net")
+    if net_dir.is_dir():
+        for iface_path in sorted(net_dir.iterdir()):
+            info = classify_wifi_interface(iface_path.name)
+            if not info:
+                continue
+            if info["bus"] == "usb":
+                usb.append(info)
+            elif info["bus"] == "builtin":
+                builtin.append(info)
+            else:
+                other.append(info)
+
+    detected = bool(usb)
+    if detected:
+        detail = ", ".join(f"{item['name']} ({item['driver']})" for item in usb)
+    else:
+        detail = "No USB WiFi interface found."
+
+    return {
+        "usb": usb,
+        "builtin": builtin,
+        "other": other,
+        "detected": detected,
+        "detail": detail,
+    }
 
 
 def detect_touchscreen(lsusb_output):
@@ -1086,7 +1155,29 @@ def nmcli(args, timeout=30):
     return run_command(["nmcli", *args], timeout=timeout, env=env)
 
 
-def wifi_interface():
+def wifi_interface(disable_builtin=False):
+    if disable_builtin:
+        detection = detect_wifi_adapters()
+        usb_names = [item["name"] for item in detection["usb"]]
+        if usb_names:
+            result = nmcli(["-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"], timeout=10)
+            if result.returncode == 0:
+                fallback = ""
+                for line in result.stdout.splitlines():
+                    parts = line.split(":")
+                    if len(parts) < 3:
+                        continue
+                    device, dev_type, state = parts[:3]
+                    if dev_type != "wifi" or device not in usb_names:
+                        continue
+                    if state == "connected":
+                        return device
+                    if not fallback:
+                        fallback = device
+                if fallback:
+                    return fallback
+            return usb_names[0]
+
     result = nmcli(["-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"], timeout=10)
     if result.returncode != 0:
         return ""
@@ -1351,6 +1442,7 @@ def test_wifi_connection(
     registry_host=None,
     registry_port=None,
     on_connected=None,
+    disable_builtin=False,
 ):
     if not ssid:
         return {"ok": True, "tested": False, "internet_reachable": False, "message": "Wi-Fi skipped.", "connectivity_report": []}
@@ -1370,7 +1462,7 @@ def test_wifi_connection(
     nmcli(["radio", "wifi", "on"], timeout=10)
     nmcli(["dev", "wifi", "rescan"], timeout=15)
 
-    iface = wifi_interface()
+    iface = wifi_interface(disable_builtin=disable_builtin)
     if not iface:
         return {
             "ok": False,
@@ -1565,6 +1657,7 @@ class ProvisioningWizard(tk.Tk):
             self._step_defaults_institution,
             self._step_defaults_group,
             self._step_defaults_device_type,
+            self._step_usb_wifi,
             self._step_wifi_country,
             self._step_wifi_ssid_pick,
             self._step_wifi_ssid_manual,
@@ -2326,18 +2419,24 @@ class ProvisioningWizard(tk.Tk):
         if getattr(self, "_cloud_nav_frame", None) is not None:
             self._cloud_nav_frame.destroy()
             self._cloud_nav_frame = None
-        if step_name == "_step_cloud_trial_ingest":
+        if step_name in ("_step_cloud_trial_ingest", "_step_usb_wifi"):
             self._cloud_nav_frame = tk.Frame(self.nav_right, bg=BG)
             self._cloud_nav_frame.pack(side="left")
+            if step_name == "_step_cloud_trial_ingest":
+                no_cmd = lambda: self._cloud_trial_ingest_chosen(False)
+                yes_cmd = lambda: self._cloud_trial_ingest_chosen(True)
+            else:
+                no_cmd = lambda: self._usb_wifi_chosen(False)
+                yes_cmd = lambda: self._usb_wifi_chosen(True)
             self._make_button(
                 self._cloud_nav_frame,
                 "No",
-                lambda: self._cloud_trial_ingest_chosen(False),
+                no_cmd,
             ).pack(side="left", padx=(0, 12))
             self._make_button(
                 self._cloud_nav_frame,
                 "Yes",
-                lambda: self._cloud_trial_ingest_chosen(True),
+                yes_cmd,
                 primary=True,
             ).pack(side="left")
         else:
@@ -2357,6 +2456,9 @@ class ProvisioningWizard(tk.Tk):
                 next_index += 1
                 continue
             if name == "_step_cloud_trial_ingest" and not self._defaults_group_cloud_data_store_enabled():
+                next_index += 1
+                continue
+            if name == "_step_usb_wifi" and self._should_skip_usb_wifi_step():
                 next_index += 1
                 continue
             if name == "_step_boot_target_device" and not boot_target_choice_required():
@@ -2392,6 +2494,9 @@ class ProvisioningWizard(tk.Tk):
                 previous_index -= 1
                 continue
             if name == "_step_cloud_trial_ingest" and not self._defaults_group_cloud_data_store_enabled():
+                previous_index -= 1
+                continue
+            if name == "_step_usb_wifi" and self._should_skip_usb_wifi_step():
                 previous_index -= 1
                 continue
             if name == "_step_boot_target_device" and not boot_target_choice_required():
@@ -2450,7 +2555,10 @@ class ProvisioningWizard(tk.Tk):
         )
         try:
             self.update_idletasks()
-            self.wifi_scan_rows, self.wifi_scan_message = scan_wifi_ssids(country)
+            self.wifi_scan_rows, self.wifi_scan_message = scan_wifi_ssids(
+                country,
+                disable_builtin=bool(self.answers.get("disable_builtin_wifi")),
+            )
         finally:
             dialog.grab_release()
             dialog.destroy()
@@ -3972,6 +4080,54 @@ class ProvisioningWizard(tk.Tk):
             selected,
         )
 
+    def _should_skip_usb_wifi_step(self):
+        detection = self.answers.get("usb_wifi_detection")
+        if isinstance(detection, dict) and "detected" in detection:
+            return not bool(detection.get("detected"))
+        return not detect_wifi_adapters()["detected"]
+
+    def _suppress_builtin_wifi_for_session(self):
+        detection = self.answers.get("usb_wifi_detection") or detect_wifi_adapters()
+        for item in detection.get("builtin", []):
+            iface = (item.get("name") or "").strip()
+            if iface:
+                nmcli(["dev", "set", iface, "managed", "no"], timeout=10)
+
+    def _usb_wifi_chosen(self, disable_builtin):
+        self.answers["disable_builtin_wifi"] = bool(disable_builtin)
+        if disable_builtin:
+            self._suppress_builtin_wifi_for_session()
+        self.step_index = self._next_index(self.step_index)
+        self._render_current_step()
+
+    def _wifi_bind_iface_for_checks(self):
+        if self.answers.get("disable_builtin_wifi"):
+            return wifi_interface(disable_builtin=True) or None
+        return None
+
+    def _builtin_wifi_review_summary(self):
+        detection = self.answers.get("usb_wifi_detection")
+        if not isinstance(detection, dict) or not detection.get("detected"):
+            return "N/A (no USB adapter)"
+        if self.answers.get("disable_builtin_wifi"):
+            detail = detection.get("detail") or "USB adapter"
+            return f"Disabled (using {detail})"
+        return "Enabled (both adapters active)"
+
+    def _step_usb_wifi(self):
+        detection = detect_wifi_adapters()
+        self.answers["usb_wifi_detection"] = detection
+        self._add_title("USB WiFi adapter")
+        self._add_label(
+            f"USB WiFi detected ({detection['detail']}). "
+            "Would you like to disable the built-in WiFi adapter and use the USB adapter?"
+        )
+        self._add_label(
+            "Choosing Yes disables the Pi's built-in WiFi on the provisioned system and "
+            "uses the USB adapter for WiFi setup in this wizard.",
+            fg=MUTED,
+        )
+
     def _step_wifi_country(self):
         self._add_title("Wi-Fi country")
         self._add_label("Enter Wi-Fi country code (2 letters, e.g. US, CA, GB, DE, FR, JP).")
@@ -4494,6 +4650,7 @@ class ProvisioningWizard(tk.Tk):
         rows = [
             ("Defaults", self.answers.get("defaults_section", "(skipped)")),
             ("Wi-Fi country", self.answers.get("wifi_country", "")),
+            ("Built-in WiFi", self._builtin_wifi_review_summary()),
             ("Wi-Fi SSID(s)", self._wifi_review_saved_ssids_text()),
             ("Wi-Fi hidden SSID", self._wifi_review_saved_hidden_text()),
             ("Wi-Fi test", self._wifi_test_summary()),
@@ -4683,6 +4840,9 @@ class ProvisioningWizard(tk.Tk):
             self.answers["defaults_section"] = section
             self._apply_defaults_section(section)
             self.answers.pop("cloud_trial_ingest", None)
+
+        elif step_name == "_step_usb_wifi":
+            return True
 
         elif step_name == "_step_wifi_country":
             if self._should_skip_wifi_country_step():
@@ -4908,6 +5068,7 @@ class ProvisioningWizard(tk.Tk):
                         registry_host=reg_h,
                         registry_port=reg_p,
                         on_connected=_on_connected,
+                        disable_builtin=bool(self.answers.get("disable_builtin_wifi")),
                     )
                 finally:
                     dialog.grab_release()
@@ -4931,7 +5092,11 @@ class ProvisioningWizard(tk.Tk):
                     while True:
                         wifi_probe_ok = bool(result.get("internet_reachable"))
                         try:
-                            post_rows = connectivity_checks_report(reg_h, reg_p, bind_iface=None)
+                            post_rows = connectivity_checks_report(
+                                reg_h,
+                                reg_p,
+                                bind_iface=self._wifi_bind_iface_for_checks(),
+                            )
                         except Exception as exc:
                             print(f"Connectivity check (post-wifi, default route): {exc}")
                             self._show_styled_error_modal(
