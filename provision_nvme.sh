@@ -87,8 +87,6 @@ DEFAULT_MESH_WORKGROUP=""
 MONITOR_WIDTH_CM_DEFAULT="21.7"
 MONITOR_HEIGHT_CM_DEFAULT="13.6"
 MONITOR_DISTANCE_CM_DEFAULT="30.0"
-ESS_SOURCE_DEFAULT="https://github.com/homebase-sheinberg/ess.git"
-ESS_SOURCE="$ESS_SOURCE_DEFAULT"
 
 # Used by EXIT trap for cleanup (must not be local vars, because traps can run after scope exits).
 HB_BOOT_MNT=""
@@ -392,11 +390,6 @@ load_defaults() {
 
   local group="${DEFAULTS_SECTION%.*}"
   local meta="${group}"
-  if ini_section_exists "$DEFAULTS_FILE" "$meta"; then
-    local ess_source
-    ess_source="$(ini_get "$DEFAULTS_FILE" "$meta" "ess_source")"
-    [[ -n "$ess_source" ]] && ESS_SOURCE="$ess_source"
-  fi
 
   local mesh_host mesh_workgroup
   mesh_host="$(ini_get "$DEFAULTS_FILE" "$DEFAULTS_SECTION" "mesh_host")"
@@ -3203,12 +3196,11 @@ install_ess_repo_root() {
   local ess_data_dir="/usr/data/essdat"
   local ess_converted_dir="/usr/data/converted"
 
+  # ESS scripts are synced by the dserv.net setup bootstrap into ~/systems/ess.
   mkdir -p "${root_mnt}${systems_dir}"
   mount_chroot_env "$root_mnt"
   local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
-  chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/git -C "$systems_dir" clone "$ESS_SOURCE" ess || true
-  chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/git config --system --add safe.directory "${systems_dir}/ess" || true
-  # Ensure the lab user owns the home directory for normal git usage.
+  # Ensure the lab user owns files created by the dserv bootstrap in this home.
   chroot "$root_mnt" "${chroot_env[@]}" /bin/chown -R "${username}:${username}" "/home/${username}" || true
   unmount_chroot_env "$root_mnt"
 
