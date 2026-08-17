@@ -16,7 +16,7 @@ set -euo pipefail
 # - Configure display mode/rotation and monitor geometry
 # - Install dserv stack + ESS repo + lazy browser editor (Caddy + code-server on demand) in NVMe rootfs
 # - Copy /etc/dserv/trial_ingest_secret from the fallback host rootfs when present (written by provision_emmc_for_nvme_fallback.sh)
-# - Enable services, kiosk settings, and seatd (with stim2 startup delay)
+# - Enable services, kiosk settings, and seatd (HDMI wait, cage -s, unbounded stim2 restart)
 # - Save full log to /var/log/provision/provision_nvme_YYYYMMDD_HHMMSS.log on NVMe rootfs
 # - Optional persistent swap file on host rootfs (eMMC when / is eMMC): HB_EMMC_SWAP_MB (default 2048; 0=off)
 # - Configure EEPROM boot order to prefer NVMe
@@ -2637,7 +2637,7 @@ ensure_host_persistent_swap() {
   fi
 }
 
-# Temporary swap for the host during chroot apt: full-upgrade + labwc/wlroots can spike RAM
+# Temporary swap for the host during chroot apt: full-upgrade can spike RAM
 # and the child apt/dpkg process is often SIGKILL'd by the OOM killer ("Killed" in logs).
 # Override with e.g. HB_CHROOT_APT_MIN_MEM_KB=999999 to always add swap, or HB_CHROOT_APT_SWAP_MB=0 to disable.
 HB_CHROOT_APT_MIN_MEM_KB="${HB_CHROOT_APT_MIN_MEM_KB:-1800000}"
@@ -2761,7 +2761,7 @@ configure_nvme_packages_and_services() {
       || die "Failed to run apt update/full-upgrade in NVMe rootfs."
   fi
 
-  # Install in batches to lower peak memory (wlroots/labwc unpack is heavy).
+  # Install in batches to lower peak memory.
   chroot_apt_get install -y \
     locales ca-certificates curl jq unzip wget git screen \
     || die "Failed to install base packages in NVMe rootfs."
@@ -2769,8 +2769,8 @@ configure_nvme_packages_and_services() {
     build-essential cmake libevdev-dev libpq-dev \
     || die "Failed to install build packages in NVMe rootfs."
   chroot_apt_get install -y \
-    libcamera-apps libtcl9.0 raspi-config lightdm seatd cage labwc \
-    || die "Failed to install desktop/kiosk packages in NVMe rootfs."
+    libcamera-apps libtcl9.0 raspi-config seatd cage \
+    || die "Failed to install kiosk packages in NVMe rootfs."
 
   if [[ -n "$locale" ]]; then
     if ! chroot_cmd /usr/sbin/locale-gen "$locale"; then
@@ -2821,12 +2821,17 @@ write_stim2_service_override_root() {
   mkdir -p "$override_dir"
   cat > "$override_file" <<'EOF'
 [Unit]
-After=systemd-logind.service seatd.service
+After=systemd-logind.service seatd.service systemd-user-sessions.service
 Wants=seatd.service
+StartLimitIntervalSec=0
 
 [Service]
 Environment=LIBSEAT_BACKEND=seatd
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do [ -e /dev/dri/card0 ] && exit 0; sleep 1; done; exit 1'
+ExecStart=
+ExecStart=/usr/bin/cage -s -- /usr/local/stim2/stim2 -F -f /usr/local/stim2/config/linux.cfg
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do for s in /sys/class/drm/card*-HDMI-A-*/status; do [ -f "$s" ] && [ "$(cat "$s")" = connected ] && exit 0; done; sleep 1; done; exit 0'
+Restart=always
+RestartSec=2
 EOF
 }
 
@@ -3230,7 +3235,7 @@ install_browser_editor_root() {
 configure_raspi_config_root() {
   local root_mnt="$1"
   if [[ ! -x "${root_mnt}/usr/bin/raspi-config" ]]; then
-    log "WARNING: raspi-config not found in NVMe rootfs; skipping console/autologin/wayland setup."
+    log "WARNING: raspi-config not found in NVMe rootfs; skipping console boot-target setup."
     return 0
   fi
 
@@ -3238,9 +3243,6 @@ configure_raspi_config_root() {
   local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
   if ! chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/raspi-config nonint do_boot_behaviour B2; then
     log "WARNING: raspi-config boot behaviour failed in NVMe rootfs."
-  fi
-  if ! chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/raspi-config nonint do_wayland W1; then
-    log "WARNING: raspi-config do_wayland W1 failed in NVMe rootfs."
   fi
   unmount_chroot_env "$root_mnt"
 }
