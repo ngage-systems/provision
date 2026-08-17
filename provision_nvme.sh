@@ -16,7 +16,7 @@ set -euo pipefail
 # - Configure display mode/rotation and monitor geometry
 # - Install dserv stack + ESS repo + lazy browser editor (Caddy + code-server on demand) in NVMe rootfs
 # - Copy /etc/dserv/trial_ingest_secret from the fallback host rootfs when present (written by provision_emmc_for_nvme_fallback.sh)
-# - Enable services, kiosk settings, and seatd (HDMI wait, cage -s, unbounded stim2 restart)
+# - Enable services, kiosk settings, and seatd (stim2 owns tty1; login console on tty2)
 # - Save full log to /var/log/provision/provision_nvme_YYYYMMDD_HHMMSS.log on NVMe rootfs
 # - Optional persistent swap file on host rootfs (eMMC when / is eMMC): HB_EMMC_SWAP_MB (default 2048; 0=off)
 # - Configure EEPROM boot order to prefer NVMe
@@ -2335,9 +2335,11 @@ write_headless_config() {
 
   : > "${boot_mnt}/ssh"
 
-  local pw_hash
-  pw_hash="$(openssl passwd -6 "$password")"
-  printf '%s:%s\n' "$username" "$pw_hash" > "${boot_mnt}/userconf.txt"
+  # Deliberately no userconf.txt here: ensure_user_exists_root creates the
+  # account directly in the rootfs. Writing it would arm Pi OS's
+  # userconfig.service, whose cancel-rename helper enables AND starts
+  # getty@tty1 mid-boot -- after cage has already claimed that VT -- which puts
+  # the console back in text mode on top of stim2.
 
   local cfg="${boot_mnt}/config.txt"
   if [[ -f "$cfg" ]]; then
@@ -2784,6 +2786,7 @@ configure_nvme_packages_and_services() {
     chroot_cmd /bin/systemctl disable bluetooth || log "WARNING: Failed to disable bluetooth in NVMe rootfs."
     chroot_cmd /bin/systemctl stop bluetooth || log "WARNING: Failed to stop bluetooth in NVMe rootfs."
     SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" enable seatd.service || log "WARNING: Failed to enable seatd in NVMe rootfs."
+    configure_kiosk_console_root "$root_mnt"
   fi
 
   host_provision_swap_deactivate
@@ -2810,6 +2813,35 @@ enable_systemd_service_root() {
   install -m 0644 "$source" "${root_mnt}/etc/systemd/system/${service_name}"
   if command -v systemctl >/dev/null 2>&1; then
     SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" enable "$service_name" || true
+  fi
+}
+
+# cage inherits whichever VT is active when it starts, which is tty1. Anything
+# that opens /dev/tty1 afterwards drops that VT back to KD_TEXT and fbcon
+# repaints over stim2; the display is not recovered until stim2 happens to
+# present its next frame (which is why loading a task appeared to "fix" it). So
+# keep every login prompt off tty1 and give the local console tty2 instead --
+# cage -s still allows Ctrl+Alt+Fn switching between the two.
+configure_kiosk_console_root() {
+  local root_mnt="$1"
+
+  # Pi OS's first-boot wizard runs cancel-rename, which does both
+  # "systemctl enable getty@tty1" and "systemctl start getty@tty1". That start
+  # lands seconds after cage is already up, and it only happens on the first
+  # boot because cancel-rename disables the wizard on its way out.
+  SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" mask userconfig.service \
+    || log "WARNING: Failed to mask userconfig.service in NVMe rootfs."
+  SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" mask getty@tty1.service autovt@tty1.service \
+    || log "WARNING: Failed to mask the tty1 getty in NVMe rootfs."
+  rm -f "${root_mnt}/etc/systemd/system/getty.target.wants/getty@tty1.service"
+
+  # Losing this would leave the box SSH-only, so fall back to the symlink
+  # systemctl would have written.
+  if ! SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" enable getty@tty2.service; then
+    log "WARNING: systemctl could not enable getty@tty2; linking it by hand."
+    mkdir -p "${root_mnt}/etc/systemd/system/getty.target.wants"
+    ln -sf /usr/lib/systemd/system/getty@.service \
+      "${root_mnt}/etc/systemd/system/getty.target.wants/getty@tty2.service"
   fi
 }
 
@@ -3232,19 +3264,16 @@ install_browser_editor_root() {
   log "Lazy browser editor configured in NVMe rootfs (Caddy on :8080; code-server starts on request)."
 }
 
-configure_raspi_config_root() {
+# This used to call "raspi-config nonint do_boot_behaviour B2". Under chroot the
+# autologin half of B2 bails out ("Can't configure autologin: USER unset"), so
+# all it ever accomplished was the set-default below. Do that directly, and skip
+# autologin entirely -- tty1 belongs to cage now, and the console is on tty2.
+configure_console_boot_target_root() {
   local root_mnt="$1"
-  if [[ ! -x "${root_mnt}/usr/bin/raspi-config" ]]; then
-    log "WARNING: raspi-config not found in NVMe rootfs; skipping console boot-target setup."
-    return 0
-  fi
 
-  mount_chroot_env "$root_mnt"
-  local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
-  if ! chroot "$root_mnt" "${chroot_env[@]}" /usr/bin/raspi-config nonint do_boot_behaviour B2; then
-    log "WARNING: raspi-config boot behaviour failed in NVMe rootfs."
+  if ! SYSTEMD_OFFLINE=1 systemctl --root "$root_mnt" set-default multi-user.target; then
+    log "WARNING: Failed to set multi-user.target as the default in NVMe rootfs."
   fi
-  unmount_chroot_env "$root_mnt"
 }
 
 wait_for_gui_reboot_request() {
@@ -3385,7 +3414,7 @@ main() {
   write_stim2_service_override_root "$HB_ROOT_MNT"
   write_dserv_agent_override_root "$HB_ROOT_MNT"
 
-  configure_raspi_config_root "$HB_ROOT_MNT"
+  configure_console_boot_target_root "$HB_ROOT_MNT"
 
   save_provision_log
 
