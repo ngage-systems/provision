@@ -3047,11 +3047,10 @@ run_dserv_bootstrap_chroot() {
   local setup_url="$2"
   local workgroup="$3"
   local attempt="$4"
-  local time_role="$5"
 
   if ! chroot "$root_mnt" "${DSERV_STACK_CHROOT_ENV[@]}" /bin/bash -c \
-    'curl -sSL "$1" | bash -s -- --workgroup "$2" --time-role "$3"' \
-    _ "$setup_url" "$workgroup" "$time_role"; then
+    'curl -sSL "$1" | bash -s -- --workgroup "$2"' \
+    _ "$setup_url" "$workgroup"; then
     log "WARNING: dserv bootstrap script exited non-zero on attempt ${attempt} (verification will follow)."
   fi
   archive_dserv_bootstrap_log_root "$root_mnt" "$attempt"
@@ -3103,16 +3102,17 @@ install_dserv_stack_root() {
   local workgroup="${DEFAULT_MESH_WORKGROUP:-brown-sheinberg}"
   local bootstrap_workgroup="${workgroup//./-}"
   local device_type="${DEFAULTS_SECTION##*.}"
-  local setup_url time_role="grandmaster eth0"
+  local setup_url
   local max_attempts="${HB_DSERV_BOOTSTRAP_MAX_ATTEMPTS}"
   local wait_sec="${HB_DSERV_BOOTSTRAP_RETRY_WAIT_SEC}"
   local attempt failed_line
   local -a failed_components=()
 
   registry_url="${registry_url%/}"
-  setup_url="${registry_url}/setup"
   if [[ "$device_type" == "incage" ]]; then
-    setup_url="${setup_url}?profile=incage"
+    setup_url="${registry_url}/setup?profile=incage&time_role=grandmaster+eth0"
+  else
+    setup_url="${registry_url}/setup?time_role=grandmaster+eth0"
   fi
 
   log "Installing dserv stack from ${setup_url} for workgroup '${bootstrap_workgroup}'..."
@@ -3123,7 +3123,7 @@ install_dserv_stack_root() {
 
   for (( attempt=1; attempt<=max_attempts; attempt++ )); do
     log "dserv stack bootstrap attempt ${attempt}/${max_attempts}..."
-    run_dserv_bootstrap_chroot "$root_mnt" "$setup_url" "$bootstrap_workgroup" "$attempt" "$time_role"
+    run_dserv_bootstrap_chroot "$root_mnt" "$setup_url" "$bootstrap_workgroup" "$attempt"
 
     failed_components=()
     while IFS= read -r failed_line; do
