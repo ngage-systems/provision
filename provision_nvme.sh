@@ -3103,9 +3103,9 @@ install_dserv_stack_root() {
 
   registry_url="${registry_url%/}"
   if [[ "$device_type" == "incage" ]]; then
-    setup_url="${registry_url}/setup?profile=incage&time_role=grandmaster+eth0"
+    setup_url="${registry_url}/setup?profile=incage"
   else
-    setup_url="${registry_url}/setup?time_role=grandmaster+eth0"
+    setup_url="${registry_url}/setup"
   fi
 
   log "Installing dserv stack from ${setup_url} for workgroup '${bootstrap_workgroup}'..."
