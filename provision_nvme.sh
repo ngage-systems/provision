@@ -3044,13 +3044,14 @@ archive_dserv_bootstrap_log_root() {
 
 run_dserv_bootstrap_chroot() {
   local root_mnt="$1"
-  local registry_url="$2"
+  local setup_url="$2"
   local workgroup="$3"
   local attempt="$4"
+  local time_role="$5"
 
   if ! chroot "$root_mnt" "${DSERV_STACK_CHROOT_ENV[@]}" /bin/bash -c \
-    'curl -sSL "$1" | bash -s -- --workgroup "$2"' \
-    _ "${registry_url}/setup" "$workgroup"; then
+    'curl -sSL "$1" | bash -s -- --workgroup "$2" --time-role "$3"' \
+    _ "$setup_url" "$workgroup" "$time_role"; then
     log "WARNING: dserv bootstrap script exited non-zero on attempt ${attempt} (verification will follow)."
   fi
   archive_dserv_bootstrap_log_root "$root_mnt" "$attempt"
@@ -3101,14 +3102,20 @@ install_dserv_stack_root() {
   local registry_url="${DEFAULT_MESH_HOST:-https://dserv.net}"
   local workgroup="${DEFAULT_MESH_WORKGROUP:-brown-sheinberg}"
   local bootstrap_workgroup="${workgroup//./-}"
+  local device_type="${DEFAULTS_SECTION##*.}"
+  local setup_url time_role="grandmaster eth0"
   local max_attempts="${HB_DSERV_BOOTSTRAP_MAX_ATTEMPTS}"
   local wait_sec="${HB_DSERV_BOOTSTRAP_RETRY_WAIT_SEC}"
   local attempt failed_line
   local -a failed_components=()
 
   registry_url="${registry_url%/}"
+  setup_url="${registry_url}/setup"
+  if [[ "$device_type" == "incage" ]]; then
+    setup_url="${setup_url}?profile=incage"
+  fi
 
-  log "Installing dserv stack from ${registry_url}/setup for workgroup '${bootstrap_workgroup}'..."
+  log "Installing dserv stack from ${setup_url} for workgroup '${bootstrap_workgroup}'..."
 
   mount_chroot_env "$root_mnt"
   trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
@@ -3116,7 +3123,7 @@ install_dserv_stack_root() {
 
   for (( attempt=1; attempt<=max_attempts; attempt++ )); do
     log "dserv stack bootstrap attempt ${attempt}/${max_attempts}..."
-    run_dserv_bootstrap_chroot "$root_mnt" "$registry_url" "$bootstrap_workgroup" "$attempt"
+    run_dserv_bootstrap_chroot "$root_mnt" "$setup_url" "$bootstrap_workgroup" "$attempt" "$time_role"
 
     failed_components=()
     while IFS= read -r failed_line; do
