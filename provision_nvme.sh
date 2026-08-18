@@ -2765,7 +2765,7 @@ configure_nvme_packages_and_services() {
 
   # Install in batches to lower peak memory.
   chroot_apt_get install -y \
-    locales ca-certificates curl jq unzip wget git screen \
+    locales ca-certificates curl jq unzip wget git screen linuxptp ethtool \
     || die "Failed to install base packages in NVMe rootfs."
   chroot_apt_get install -y \
     build-essential cmake libevdev-dev libpq-dev \
