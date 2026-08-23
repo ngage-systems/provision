@@ -2899,6 +2899,32 @@ screen_set DistanceToMonitor   ${MONITOR_DISTANCE_CM}
 EOF
 }
 
+write_dserv_rig_tcl_root() {
+  local root_mnt="$1"
+  local username="$2"
+  local systems_dir="/home/${username}/systems"
+  local ess_data_dir="/usr/data/essdat"
+  local ess_converted_dir="/usr/data/converted"
+  local local_dir="${root_mnt}/usr/local/dserv/local"
+  local rig_file="${local_dir}/rig.tcl"
+  local registry_url workgroup
+
+  mkdir -p "$local_dir"
+  {
+    echo "# Declared by provision_nvme.sh"
+    if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" ]]; then
+      registry_url="${DEFAULT_MESH_HOST%/}"
+      workgroup="${DEFAULT_MESH_WORKGROUP//./-}"
+      echo "setting registry url       ${registry_url}"
+      echo "setting registry workgroup ${workgroup}"
+    fi
+    echo "setting ess system_path    ${systems_dir%/}"
+    echo "setting ess data_dir       ${ess_data_dir}"
+    echo "setting ess export_path    ${ess_converted_dir}"
+  } >"$rig_file"
+  log "Wrote dserv rig settings to /usr/local/dserv/local/rig.tcl"
+}
+
 configure_dserv_local_tcl_root() {
   local root_mnt="$1"
 
@@ -2918,23 +2944,6 @@ configure_dserv_local_tcl_root() {
 sound::init_fluidsynth /usr/share/sounds/sf2/default-GM.sf2 plughw:0,0
 EOF
       log "Appended FluidSynth init to sound.tcl"
-    fi
-  fi
-  if [[ -f "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" ]]; then
-    local mesh_target="${root_mnt}/usr/local/dserv/local/mesh.tcl"
-    cp -n "${root_mnt}/usr/local/dserv/local/mesh.tcl.EXAMPLE" "$mesh_target" || true
-    if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$mesh_target" ]]; then
-      local mesh_workgroup="${DEFAULT_MESH_WORKGROUP//./-}"
-      sed -i -E "s|^mesh_configure[[:space:]]+\"[^\"]*\"[[:space:]]+\"[^\"]*\"|mesh_configure \"${DEFAULT_MESH_HOST}\" \"${mesh_workgroup}\"|" "$mesh_target"
-    fi
-  fi
-  if [[ -f "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" ]]; then
-    local pre_registry_target="${root_mnt}/usr/local/dserv/local/pre-registry.tcl"
-    cp -n "${root_mnt}/usr/local/dserv/local/pre-registry.tcl.EXAMPLE" "$pre_registry_target" || true
-    if [[ -n "$DEFAULT_MESH_HOST" && -n "$DEFAULT_MESH_WORKGROUP" && -f "$pre_registry_target" ]]; then
-      local pre_registry_workgroup="${DEFAULT_MESH_WORKGROUP//./-}"
-      sed -i -E "s|^set env\\(ESS_REGISTRY_URL\\)[[:space:]]+.*|set env(ESS_REGISTRY_URL) ${DEFAULT_MESH_HOST}|" "$pre_registry_target"
-      sed -i -E "s|^set env\\(ESS_WORKGROUP\\)[[:space:]]+.*|set env(ESS_WORKGROUP)    ${pre_registry_workgroup}|" "$pre_registry_target"
     fi
   fi
 }
@@ -3230,8 +3239,6 @@ install_ess_repo_root() {
   local root_mnt="$1"
   local username="$2"
   local systems_dir="/home/${username}/systems"
-  local ess_data_dir="/usr/data/essdat"
-  local ess_converted_dir="/usr/data/converted"
 
   # ESS scripts are synced by the dserv.net setup bootstrap into ~/systems/ess.
   mkdir -p "${root_mnt}${systems_dir}"
@@ -3241,12 +3248,7 @@ install_ess_repo_root() {
   chroot "$root_mnt" "${chroot_env[@]}" /bin/chown -R "${username}:${username}" "/home/${username}" || true
   unmount_chroot_env "$root_mnt"
 
-  mkdir -p "${root_mnt}/usr/local/dserv/local"
-  cat > "${root_mnt}/usr/local/dserv/local/pre-systemdir.tcl" <<EOF
-set env(ESS_SYSTEM_PATH) ${systems_dir%/}
-set env(ESS_DATA_DIR)    ${ess_data_dir}
-set env(ESS_EXPORT_PATH) ${ess_converted_dir}
-EOF
+  write_dserv_rig_tcl_root "$root_mnt" "$username"
 }
 
 install_browser_editor_root() {
