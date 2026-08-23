@@ -2908,6 +2908,31 @@ write_dserv_rig_tcl_root() {
   local local_dir="${root_mnt}/usr/local/dserv/local"
   local rig_file="${local_dir}/rig.tcl"
   local registry_url workgroup
+  local device_type="${DEFAULTS_SECTION##*.}"
+  local ingest_url=""
+  local defaults_file group
+
+  if [[ "${ANSWER_CLOUD_TRIAL_INGEST:-false}" == "true" ]]; then
+    defaults_file="${DEFAULTS_FILE:-}"
+    if [[ -z "$defaults_file" || ! -r "$defaults_file" ]]; then
+      local script_path script_dir
+      script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+      script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
+      defaults_file="${script_dir}/device_defaults.ini"
+    fi
+    group="${ANSWER_DEFAULTS_GROUP:-}"
+    if [[ -z "$group" && -n "${DEFAULTS_SECTION:-}" ]]; then
+      group="${DEFAULTS_SECTION%.*}"
+    fi
+    if [[ -z "$group" ]]; then
+      log "WARNING: No defaults group available; skipping trialsync ingest_url in rig.tcl."
+    else
+      ingest_url="$(cloud_ingest_url_for_defaults_group "$group" "$defaults_file")"
+      if [[ -z "$ingest_url" ]]; then
+        log "WARNING: cloud_ingest not set for section ${group} in ${defaults_file}; skipping trialsync ingest_url in rig.tcl."
+      fi
+    fi
+  fi
 
   mkdir -p "$local_dir"
   {
@@ -2921,31 +2946,14 @@ write_dserv_rig_tcl_root() {
     echo "setting ess system_path    ${systems_dir%/}"
     echo "setting ess data_dir       ${ess_data_dir}"
     echo "setting ess export_path    ${ess_converted_dir}"
+    if [[ -n "$ingest_url" ]]; then
+      echo "setting trialsync ingest_url ${ingest_url}"
+    fi
+    if [[ "$device_type" == "incage" ]]; then
+      echo "setting sound output_class hdmi"
+    fi
   } >"$rig_file"
   log "Wrote dserv rig settings to /usr/local/dserv/local/rig.tcl"
-}
-
-configure_dserv_local_tcl_root() {
-  local root_mnt="$1"
-
-  if [[ -f "${root_mnt}/usr/local/dserv/local/post-pins.tcl.EXAMPLE" ]]; then
-    cp -n "${root_mnt}/usr/local/dserv/local/post-pins.tcl.EXAMPLE" "${root_mnt}/usr/local/dserv/local/post-pins.tcl" || true
-  fi
-  local sound_target="${root_mnt}/usr/local/dserv/local/sound.tcl"
-  if [[ -f "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" ]]; then
-    cp -n "${root_mnt}/usr/local/dserv/local/sound.tcl.EXAMPLE" "$sound_target" || true
-  fi
-  if [[ -f "$sound_target" ]]; then
-    if ! grep -qE '^[[:space:]]*sound::init_fluidsynth[[:space:]]' "$sound_target" 2>/dev/null; then
-      if [[ -s "$sound_target" ]] && [[ "$(tail -c1 "$sound_target" 2>/dev/null)" != $'\n' ]]; then
-        printf '\n' >>"$sound_target" || true
-      fi
-      cat >>"$sound_target" <<'EOF'
-sound::init_fluidsynth /usr/share/sounds/sf2/default-GM.sf2 plughw:0,0
-EOF
-      log "Appended FluidSynth init to sound.tcl"
-    fi
-  fi
 }
 
 dserv_stack_chroot_env() {
@@ -3188,8 +3196,6 @@ install_dserv_stack_root() {
     log_dserv_stack_abort_banner "${failed_components[@]}"
     die "dserv stack installation failed after ${max_attempts} attempts."
   fi
-
-  configure_dserv_local_tcl_root "$root_mnt"
 }
 
 sync_trial_ingest_secret_to_nvme_root() {
@@ -3210,29 +3216,6 @@ sync_trial_ingest_secret_to_nvme_root() {
 
   write_trial_ingest_secret "$line" "$root_mnt"
   log "Installed trial ingest secret from host into NVMe rootfs."
-}
-
-configure_trial_ingest_pre_remoteservers_root() {
-  local root_mnt="$1"
-
-  if [[ "${ANSWER_CLOUD_TRIAL_INGEST:-false}" != "true" ]]; then
-    return 0
-  fi
-
-  local defaults_file="${DEFAULTS_FILE:-}"
-  if [[ -z "$defaults_file" || ! -r "$defaults_file" ]]; then
-    local script_path script_dir
-    script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-    script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
-    defaults_file="${script_dir}/device_defaults.ini"
-  fi
-
-  local group="${ANSWER_DEFAULTS_GROUP:-}"
-  if [[ -z "$group" && -n "${DEFAULTS_SECTION:-}" ]]; then
-    group="${DEFAULTS_SECTION%.*}"
-  fi
-
-  configure_trial_ingest_pre_remoteservers "$root_mnt" "$group" "$defaults_file"
 }
 
 install_ess_repo_root() {
@@ -3405,7 +3388,6 @@ main() {
   configure_persistent_journal_root "$HB_ROOT_MNT"
   install_dserv_stack_root "$HB_ROOT_MNT"
   sync_trial_ingest_secret_to_nvme_root "$HB_ROOT_MNT"
-  configure_trial_ingest_pre_remoteservers_root "$HB_ROOT_MNT"
   install_ess_repo_root "$HB_ROOT_MNT" "$username"
   install_browser_editor_root "$HB_ROOT_MNT" "$username" "$password" "$hostname"
   write_monitor_tcl_root "$HB_ROOT_MNT"
