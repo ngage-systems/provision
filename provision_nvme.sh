@@ -2946,6 +2946,7 @@ write_dserv_rig_tcl_root() {
     echo "setting ess system_path    ${systems_dir%/}"
     echo "setting ess data_dir       ${ess_data_dir}"
     echo "setting ess export_path    ${ess_converted_dir}"
+    echo "setting ess obs_pin        -1"
     if [[ -n "$ingest_url" ]]; then
       echo "setting trialsync ingest_url ${ingest_url}"
     fi
@@ -3093,11 +3094,12 @@ run_dserv_bootstrap_chroot() {
   local root_mnt="$1"
   local setup_url="$2"
   local workgroup="$3"
-  local attempt="$4"
+  local username="$4"
+  local attempt="$5"
 
   if ! chroot "$root_mnt" "${DSERV_STACK_CHROOT_ENV[@]}" /bin/bash -c \
-    'curl -sSL "$1" | bash -s -- --workgroup "$2"' \
-    _ "$setup_url" "$workgroup"; then
+    'curl -sSL "$1" | bash -s -- --workgroup "$2" --user "$3" --scripts' \
+    _ "$setup_url" "$workgroup" "$username"; then
     log "WARNING: dserv bootstrap script exited non-zero on attempt ${attempt} (verification will follow)."
   fi
   archive_dserv_bootstrap_log_root "$root_mnt" "$attempt"
@@ -3145,6 +3147,7 @@ log_dserv_stack_abort_banner() {
 
 install_dserv_stack_root() {
   local root_mnt="$1"
+  local username="$2"
   local registry_url="${DEFAULT_MESH_HOST:-https://dserv.net}"
   local workgroup="${DEFAULT_MESH_WORKGROUP:-brown-sheinberg}"
   local bootstrap_workgroup="${workgroup//./-}"
@@ -3162,7 +3165,7 @@ install_dserv_stack_root() {
     setup_url="${registry_url}/setup"
   fi
 
-  log "Installing dserv stack from ${setup_url} for workgroup '${bootstrap_workgroup}'..."
+  log "Installing dserv stack from ${setup_url} for workgroup '${bootstrap_workgroup}' (user '${username}', with scripts)..."
 
   mount_chroot_env "$root_mnt"
   trap 'unmount_chroot_env "'"$root_mnt"'"' RETURN
@@ -3170,7 +3173,7 @@ install_dserv_stack_root() {
 
   for (( attempt=1; attempt<=max_attempts; attempt++ )); do
     log "dserv stack bootstrap attempt ${attempt}/${max_attempts}..."
-    run_dserv_bootstrap_chroot "$root_mnt" "$setup_url" "$bootstrap_workgroup" "$attempt"
+    run_dserv_bootstrap_chroot "$root_mnt" "$setup_url" "$bootstrap_workgroup" "$username" "$attempt"
 
     failed_components=()
     while IFS= read -r failed_line; do
@@ -3223,7 +3226,7 @@ install_ess_repo_root() {
   local username="$2"
   local systems_dir="/home/${username}/systems"
 
-  # ESS scripts are synced by the dserv.net setup bootstrap into ~/systems/ess.
+  # ESS scripts were pulled by setup --scripts into ~/systems/ess.
   mkdir -p "${root_mnt}${systems_dir}"
   mount_chroot_env "$root_mnt"
   local chroot_env=(/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root DEBIAN_FRONTEND=noninteractive)
@@ -3386,7 +3389,7 @@ main() {
 
   configure_nvme_packages_and_services "$HB_ROOT_MNT" "$locale"
   configure_persistent_journal_root "$HB_ROOT_MNT"
-  install_dserv_stack_root "$HB_ROOT_MNT"
+  install_dserv_stack_root "$HB_ROOT_MNT" "$username"
   sync_trial_ingest_secret_to_nvme_root "$HB_ROOT_MNT"
   install_ess_repo_root "$HB_ROOT_MNT" "$username"
   install_browser_editor_root "$HB_ROOT_MNT" "$username" "$password" "$hostname"
