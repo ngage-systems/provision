@@ -4,13 +4,19 @@
 #
 # "USB" disables the onboard radio (dtoverlay=disable-wifi) so saved
 # NetworkManager profiles attach to the USB adapter, unless a profile is tied
-# to a specific interface or MAC (the script warns about those). "Built-in"
-# removes that overlay and restores the provision-time brcmfmac modprobe option
-# if it is missing. Profiles are not rewritten.
+# to a specific interface or MAC (the script warns about those). While the
+# built-in radio is still up, USB is tested first: a temporary copy of the
+# active profile is brought up on the USB adapter with no default route, and
+# its gateway is pinged. The copy is then removed. config.txt is left
+# unchanged when that ping fails, so an SSH session on the built-in radio
+# stays up. "Built-in" removes the overlay and restores the provision-time
+# brcmfmac modprobe option if it is missing. Profiles are not rewritten.
 set -euo pipefail
 
 BRCMFMAC_CONF="/etc/modprobe.d/brcmfmac.conf"
 BRCMFMAC_DEFAULT="options brcmfmac roamoff=1"
+USB_TEST_PROFILE="swap-wifi-usb-test"
+USB_TEST_ACTIVE=0
 
 die() {
   echo "ERROR: $*" >&2
@@ -243,6 +249,222 @@ apply_builtin() {
   fi
 }
 
+# Remove the temporary USB test profile if a run is interrupted.
+cleanup_usb_test() {
+  local name
+  [[ "$USB_TEST_ACTIVE" -eq 1 ]] || return 0
+  name="$USB_TEST_PROFILE"
+  USB_TEST_ACTIVE=0
+  have_cmd nmcli || return 0
+  nmcli connection down "$name" >/dev/null 2>&1 || true
+  nmcli connection delete "$name" >/dev/null 2>&1 || true
+}
+
+# Print the name of the active Wi-Fi profile on iface, if there is one.
+active_wifi_name_on() {
+  local iface="$1" line uuid rest type dev
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    uuid="${line%%:*}"
+    rest="${line#*:}"
+    type="${rest%%:*}"
+    dev="${rest#*:}"
+    if [[ "$dev" == "$iface" && "$type" == "802-11-wireless" ]]; then
+      nmcli -e no -g connection.id connection show "$uuid" </dev/null || return 1
+      return 0
+    fi
+  done < <(nmcli -e no -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null || true)
+  return 1
+}
+
+list_wifi_profile_names() {
+  local line uuid rest type name
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    uuid="${line%%:*}"
+    rest="${line#*:}"
+    type="${rest%%:*}"
+    name="${rest#*:}"
+    [[ "$type" == "802-11-wireless" || "$type" == "wifi" ]] || continue
+    [[ "$name" == "$USB_TEST_PROFILE" ]] && continue
+    printf '%s\n' "$name"
+  done < <(nmcli -e no -t -f UUID,TYPE,NAME connection show 2>/dev/null || true)
+}
+
+# Ask only when more than one USB adapter is present. Prompts go to stderr
+# so the chosen name can be captured from stdout.
+choose_usb_iface() {
+  local choice i
+  if [[ ${#usb_ifaces_arr[@]} -eq 1 ]]; then
+    printf '%s\n' "${usb_ifaces_arr[0]}"
+    return 0
+  fi
+  echo "Which USB adapter should be tested?" >&2
+  for i in "${!usb_ifaces_arr[@]}"; do
+    echo "  $((i + 1))) ${usb_ifaces_arr[$i]}" >&2
+  done
+  while true; do
+    read -r -p "USB adapter: " choice || { echo; return 1; }
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#usb_ifaces_arr[@]} )); then
+      printf '%s\n' "${usb_ifaces_arr[$((choice - 1))]}"
+      return 0
+    fi
+    echo "Enter a number from the list." >&2
+  done
+}
+
+choose_saved_profile() {
+  local choice i
+  local -a names=("$@")
+  if [[ ${#names[@]} -eq 1 ]]; then
+    printf '%s\n' "${names[0]}"
+    return 0
+  fi
+  echo "Which saved network should the USB test use?" >&2
+  for i in "${!names[@]}"; do
+    echo "  $((i + 1))) ${names[$i]}" >&2
+  done
+  while true; do
+    read -r -p "Network: " choice || { echo; return 1; }
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#names[@]} )); then
+      printf '%s\n' "${names[$((choice - 1))]}"
+      return 0
+    fi
+    echo "Enter a number from the list." >&2
+  done
+}
+
+# Ping the gateway DHCP offered on iface. IP4.GATEWAY stays empty when the
+# test profile sets ipv4.never-default, because that field is the installed
+# default route. The DHCP "routers" option is still filled in.
+# Returns 1 when there is no address, no router, or the ping fails.
+# The live profile is not modified.
+probe_iface_gateway() {
+  local iface="$1" line gw="" fallback="" addr=""
+  while IFS= read -r line; do
+    if [[ "$line" == IP4.ADDRESS* ]]; then
+      [[ -z "$addr" ]] && addr="${line#*:}"
+    elif [[ "$line" == *':routers = '* ]]; then
+      gw="${line#*:routers = }"
+    elif [[ "$line" == IP4.GATEWAY:* ]]; then
+      fallback="${line#IP4.GATEWAY:}"
+    fi
+  done < <(nmcli -e no -t -f IP4.ADDRESS,IP4.GATEWAY,DHCP4.OPTION device show "$iface" </dev/null 2>/dev/null || true)
+  gw="${gw//[[:space:]]/}"
+  fallback="${fallback//[[:space:]]/}"
+  addr="${addr//[[:space:]]/}"
+  if [[ -z "$gw" || "$gw" == "--" || "$gw" == "0.0.0.0" ]]; then
+    gw="$fallback"
+  fi
+  if [[ -z "$gw" || "$gw" == "--" || "$gw" == "0.0.0.0" ]]; then
+    if [[ -z "$addr" ]]; then
+      log "USB adapter ${iface} did not get an IPv4 address."
+    else
+      log "USB adapter ${iface} got ${addr%%/*} but DHCP offered no router."
+    fi
+    return 1
+  fi
+  log "Pinging ${gw} via ${iface}."
+  if ping -n -I "$iface" -c 3 -W 2 "$gw"; then
+    return 0
+  fi
+  log "Ping to ${gw} via ${iface} failed."
+  return 1
+}
+
+# Clone src onto usb_iface with no default route, ping, then delete the clone.
+# Returns 1 without leaving the clone behind when the adapter does not connect.
+probe_cloned_profile() {
+  local usb_iface="$1" src="$2" pin_iface="" pin_mac=""
+  if nmcli -e no connection show "$USB_TEST_PROFILE" >/dev/null 2>&1; then
+    nmcli connection delete "$USB_TEST_PROFILE" >/dev/null 2>&1 || true
+  fi
+  pin_iface="$(nmcli -e no -g connection.interface-name connection show "$src" </dev/null 2>/dev/null || true)"
+  pin_mac="$(nmcli -e no -g 802-11-wireless.mac-address connection show "$src" </dev/null 2>/dev/null || true)"
+  if [[ -n "${pin_iface//[[:space:]]/}" || -n "${pin_mac//[[:space:]]/}" ]]; then
+    log "WARNING: ${src} is tied to one adapter. The test uses an unpinned copy."
+    log "A successful test does not mean the saved profile will follow the USB adapter."
+  fi
+  if ! nmcli connection clone "$src" "$USB_TEST_PROFILE" >/dev/null; then
+    log "Could not clone profile ${src}."
+    return 1
+  fi
+  USB_TEST_ACTIVE=1
+  if ! nmcli connection modify "$USB_TEST_PROFILE" \
+    connection.interface-name "$usb_iface" \
+    connection.autoconnect no \
+    ipv4.never-default yes \
+    ipv6.never-default yes \
+    802-11-wireless.mac-address ""; then
+    log "Could not configure the temporary profile."
+    cleanup_usb_test
+    return 1
+  fi
+  log "Bringing up ${src} on ${usb_iface}. The current connection is left in place."
+  if ! nmcli -w 60 connection up "$USB_TEST_PROFILE"; then
+    log "The USB adapter did not connect with profile ${src}."
+    cleanup_usb_test
+    return 1
+  fi
+  if ! probe_iface_gateway "$usb_iface"; then
+    cleanup_usb_test
+    return 1
+  fi
+  cleanup_usb_test
+  return 0
+}
+
+# Returns 0 when the USB adapter reached its gateway. The built-in session
+# keeps its default route: either the USB adapter is already connected, or
+# the test profile is created with ipv4.never-default.
+pretest_usb() {
+  local usb_iface="" src="" iface
+  local -a saved=()
+  have_cmd nmcli || { log "nmcli is required to pre-test the USB adapter."; return 1; }
+  have_cmd ping || { log "ping is required to pre-test the USB adapter."; return 1; }
+
+  for iface in "${usb_ifaces_arr[@]}"; do
+    src="$(active_wifi_name_on "$iface" || true)"
+    if [[ -n "$src" ]]; then
+      usb_iface="$iface"
+      break
+    fi
+  done
+  if [[ -n "$usb_iface" ]]; then
+    log "USB adapter ${usb_iface} is already connected with profile ${src}."
+    if ! probe_iface_gateway "$usb_iface"; then
+      return 1
+    fi
+    return 0
+  fi
+
+  src=""
+  for iface in "${builtin_ifaces_arr[@]}"; do
+    src="$(active_wifi_name_on "$iface" || true)"
+    [[ -n "$src" ]] && break
+  done
+  if [[ -z "$src" ]]; then
+    mapfile -t saved < <(list_wifi_profile_names || true)
+    if [[ ${#saved[@]} -eq 0 ]]; then
+      log "No saved Wi-Fi profile to test."
+      return 1
+    fi
+    src="$(choose_saved_profile "${saved[@]}")" || die "No network selected. No files changed."
+  fi
+
+  if [[ ${#usb_ifaces_arr[@]} -eq 1 ]]; then
+    usb_iface="${usb_ifaces_arr[0]}"
+  else
+    usb_iface="$(choose_usb_iface)" || die "No USB adapter selected. No files changed."
+  fi
+  log "Testing ${src} on ${usb_iface} without moving the current connection."
+  if ! probe_cloned_profile "$usb_iface" "$src"; then
+    return 1
+  fi
+  log "USB adapter ${usb_iface} reached its gateway. The temporary profile was removed."
+  return 0
+}
+
 prompt_reboot() {
   local choice
   echo
@@ -263,7 +485,7 @@ main() {
   local cfg usb_default=0 choice line
   local iface driver bus kind
   local saw_usb=0 saw_builtin=0 usb_ifaces=""
-  local -a adapters=()
+  local -a adapters=() usb_ifaces_arr=() builtin_ifaces_arr=()
   local current_usb="" current_builtin=""
 
   if [[ $# -gt 0 ]]; then
@@ -273,6 +495,7 @@ main() {
   if [[ ! -t 0 ]]; then
     die "This script is interactive. Run it in a terminal."
   fi
+  trap cleanup_usb_test EXIT
 
   cfg="$(find_boot_config)" || die "Could not find /boot/firmware/config.txt or /boot/config.txt."
   if config_disables_builtin "$cfg"; then
@@ -291,6 +514,7 @@ main() {
         usb)
           kind="USB"
           saw_usb=1
+          usb_ifaces_arr+=("$iface")
           if [[ -n "$usb_ifaces" ]]; then
             usb_ifaces+=", ${iface}"
           else
@@ -300,6 +524,7 @@ main() {
         builtin)
           kind="built-in"
           saw_builtin=1
+          builtin_ifaces_arr+=("$iface")
           ;;
         *)
           kind="other"
@@ -335,6 +560,9 @@ main() {
   echo "Make which adapter the default?"
   if [[ -n "$usb_ifaces" ]]; then
     echo "  1) USB (${usb_ifaces}) — disable the built-in radio${current_usb}"
+    if [[ "$saw_builtin" -eq 1 ]]; then
+      echo "     The USB adapter is tested first. config.txt is unchanged if the test fails."
+    fi
   else
     echo "  1) USB — disable the built-in radio${current_usb}"
     echo "     No USB Wi-Fi adapter found. This choice will be refused."
@@ -348,6 +576,18 @@ main() {
       *) echo "Enter 1 or 2." ;;
     esac
   done
+
+  if [[ "$choice" == "1" && ${#usb_ifaces_arr[@]} -eq 0 && "$saw_builtin" -eq 1 ]]; then
+    die "No USB Wi-Fi adapter found. Plug one in and run this script again."
+  fi
+  if [[ "$choice" == "1" && "$saw_builtin" -eq 1 ]]; then
+    if ! pretest_usb; then
+      if [[ "$usb_default" -eq 1 ]]; then
+        die "USB pre-test failed. The overlay is already in config.txt. Not rebooting."
+      fi
+      die "USB pre-test failed. config.txt was not changed."
+    fi
+  fi
 
   if [[ "$choice" == "1" && "$usb_default" -eq 1 ]]; then
     if [[ "$saw_builtin" -eq 1 ]]; then
